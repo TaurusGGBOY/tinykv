@@ -17,13 +17,8 @@ func (server *Server) RawGet(_ context.Context, req *kvrpcpb.RawGetRequest) (*kv
 		return nil, err
 	}
 	val, err := r.GetCF(req.Cf, req.Key)
-
 	if err != nil {
 		return nil, err
-	}
-
-	if val == nil {
-		return &kvrpcpb.RawGetResponse{NotFound: true}, nil
 	}
 	return &kvrpcpb.RawGetResponse{Value: val}, nil
 }
@@ -54,15 +49,16 @@ func (server *Server) RawScan(_ context.Context, req *kvrpcpb.RawScanRequest) (*
 		return nil, err
 	}
 	iter := r.IterCF(req.Cf)
+
 	response := &kvrpcpb.RawScanResponse{}
-	for iter.Seek(req.StartKey); iter.Valid() && len(response.Kvs)<int(req.Limit); iter.Next() {
+	for iter.Valid() {
 		item := iter.Item()
 		key := item.Key()
 		val, err := item.Value()
-		if err == nil {
-			response.Kvs = append(response.Kvs, &kvrpcpb.KvPair{Key: key, Value: val})
+		if err != nil{
+			response.Kvs = append(response.Kvs, &kvrpcpb.KvPair{Key: key,Value : val})
 		}
+		iter.Next()
 	}
-	r.Close()
 	return response, nil
 }
