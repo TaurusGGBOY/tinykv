@@ -50,13 +50,25 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
+	first uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
-	return nil
+	l, _ := storage.FirstIndex()
+	h, _ := storage.LastIndex()
+	entries, _ := storage.Entries(l, h+1)
+	snapshot, _ := storage.Snapshot()
+	return &RaftLog{
+		storage:         storage,
+		applied:         l - 1,
+		stabled:         h,
+		entries:         entries,
+		pendingSnapshot: &snapshot,
+		first:           l,
+	}
 }
 
 // We need to compact the log entries in some point of time like
@@ -69,23 +81,50 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return nil
+	return l.entries[l.getIndex(l.stabled)+1:]
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
-	return nil
+	notApplied := l.getIndex(l.applied) + 1
+	committed := l.getIndex(l.committed)
+	return l.entries[notApplied : committed+1]
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	return 0
+	if len(l.entries) > 0 {
+		return l.entries[len(l.entries)-1].GetIndex()
+	}
+	index, _ := l.storage.LastIndex()
+	return index
+}
+
+func (l *RaftLog) FirstIndex() uint64 {
+	// Your Code Here (2A).
+	if len(l.entries) > 0 {
+		return l.entries[0].GetIndex()
+	}
+	index, _ := l.storage.LastIndex()
+	return index + 1
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	return 0, nil
+	first, _ := l.storage.FirstIndex()
+	if i < first {
+		return l.storage.Term(i)
+	}
+	return l.entries[l.getIndex(i)].Term, nil
+}
+
+func (l *RaftLog) getIndex(index uint64) uint64 {
+	return index - l.first
+}
+
+func (l *RaftLog) getByIndex(index uint64) *pb.Entry {
+	return &l.entries[l.getIndex(index)]
 }

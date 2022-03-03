@@ -497,7 +497,7 @@ func TestLeaderCommitPrecedingEntries2AB(t *testing.T) {
 		r.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: []byte("some data")}}})
 
 		for _, m := range r.readMessages() {
-			r.Step(acceptAndReply(m))
+ 			r.Step(acceptAndReply(m))
 		}
 
 		li := uint64(len(tt))
