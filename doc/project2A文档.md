@@ -120,9 +120,6 @@
   + 2号开始选举 index：3
   + 2号提议一个日志 index：3
 + TestFollowerAppendEntries2AB
-+ TestProposal2AB
-  + 第三个用例是一个正常，两个黑洞
-  + 候选人不处理propose就行
 
 ### RaftLog
 
@@ -158,8 +155,54 @@
 	+ commitNoopEntry：r.RaftLog.stabled = r.RaftLog.LastIndex()
 + 什么时候需要回退
 
+### 结果
+
+![](https://gitee.com/agaogao/photobed/raw/master/img/20220307233553.png)
 
 ## 2AC
+
+### RawNode
+
++ RawNode是什么：是一个raft的封装？就这么简单？
++ 应用层是通过RawNode来接触Raft的
++ Raft和应用层通过Ready通信
+  + 发送信息给其他用户
+  + 保存日志到stable
+  + 保存硬状态
+  + apply提交日志
+  + 等
++ 应用层调Ready（）决定什么时候处理
++ 调了ready过后，应用层调起其他函数
+
+### 测试脚本
+**TestRawNodeStart2AC**
+
++ 创建RawNode
++ 竞选
++ 查询ready
++ 往storage里面追加日志
++ 告知raft ready已经用完了
++ 提议一个日志
++ 查询ready
++ 此时rawNode上日志长度应该为1，commitEntries也应该为1
++ 往storage里面追加日志
++ 告知raft ready已经用完了
++ 如果rawNode还说有ready就是错的
+
+**TestFollowerAppendEntries2AB**
+
++ 说在获取unstableEntries的时候超了
++ 看了下在只有1日志的时候，说已经stable到2了
++ 有点问题
+  + 感觉意思是如果心跳中没有包含所有新的日志就要继续要新日志？
+
+![](https://gitee.com/agaogao/photobed/raw/master/img/20220307233359.png)
+
+## 2A
+
+### 结果
+
+![](https://gitee.com/agaogao/photobed/raw/master/img/20220307233512.png)
 
 ## 常见错误
 

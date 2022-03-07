@@ -70,12 +70,16 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	CurrentReady *Ready
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	r := newRaft(config)
+	soft := SoftState{Lead: r.Lead, RaftState: r.State}
+	hard := pb.HardState{Term: r.Term, Vote: r.Vote, Commit: r.RaftLog.committed}
+	return &RawNode{Raft: r, CurrentReady: &Ready{SoftState: &soft, HardState: hard}}, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -143,19 +147,51 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{}
+	r := rn.Raft
+	ready := Ready{
+		Entries:          r.RaftLog.unstableEntries(),
+		CommittedEntries: r.RaftLog.entries[r.RaftLog.getIndex(r.RaftLog.applied+1):r.RaftLog.getIndex(r.RaftLog.committed+1)],
+	}
+	soft := &SoftState{Lead: r.Lead, RaftState: r.State}
+	hard := pb.HardState{Term: r.Term, Vote: r.Vote, Commit: r.RaftLog.committed}
+	if !soft.equals(rn.CurrentReady.SoftState) {
+		ready.SoftState = soft
+	}
+	if !equals(hard, rn.CurrentReady.HardState) {
+		ready.HardState = hard
+	}
+	return ready
+}
+
+func (soft1 *SoftState) equals(soft2 *SoftState) bool {
+	return soft1.Lead == soft2.Lead && soft2.RaftState == soft2.RaftState
+}
+
+func equals(hard1 pb.HardState, hard2 pb.HardState) bool {
+	return hard1.GetTerm() == hard2.GetTerm() && hard1.GetCommit() == hard2.GetCommit() && hard1.Vote == hard2.GetVote()
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
-	return false
+	ready := rn.Ready()
+	return len(ready.Entries) > 0 || len(ready.CommittedEntries) > 0 ||
+		ready.SoftState != nil || !IsEmptyHardState(ready.HardState)
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	rn.Raft.RaftLog.stabled = (uint64)(len(rd.Entries)) + rn.Raft.RaftLog.stabled
+
+	rn.Raft.RaftLog.applied = rn.Raft.RaftLog.applied + (uint64)(len(rd.CommittedEntries))
+	if rd.SoftState != nil {
+		rn.CurrentReady.SoftState = rd.SoftState
+	}
+	if !IsEmptyHardState(rd.HardState) {
+		rn.CurrentReady.HardState = rd.HardState
+	}
 }
 
 // GetProgress return the Progress of this node and its peers, if this
