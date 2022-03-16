@@ -214,11 +214,13 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 				} else {
 					start := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", 0)
 					end := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
-					// log.Infof("%d: client new scan %v-%v\n", cli, start, end)
+					log.Infof("%d: client new scan %v-%v\n", cli, start, end)
 					values := cluster.Scan([]byte(start), []byte(end))
 					v := string(bytes.Join(values, []byte("")))
 					if v != last {
 						log.Fatalf("get wrong value, client %v\nwant:%v\ngot: %v\n", cli, last, v)
+					}else{
+						log.Infof("get right value, client %v\nwant:%v\ngot: %v\n", cli, last, v)
 					}
 				}
 			}

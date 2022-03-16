@@ -27,7 +27,7 @@ dev: default test
 test:
 	@echo "Running tests in native mode."
 	@export TZ='Asia/Shanghai'; \
-	LOG_LEVEL=fatal $(GOTEST) -cover $(PACKAGES)
+	LOG_LEVEL=info $(GOTEST) -cover $(PACKAGES)
 
 CURDIR := $(shell pwd)
 export PATH := $(CURDIR)/bin/:$(PATH)
