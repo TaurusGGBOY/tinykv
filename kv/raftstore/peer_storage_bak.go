@@ -42,7 +42,7 @@ package raftstore
 //	snapState snap.SnapState
 //	// regionSched used to schedule task to region worker
 //	regionSched chan<- worker.Task
-//	// generate snapshot tried count
+//	// gennerate snapshot tried count
 //	snapTriedCnt int
 //	// Engine include two badger instance: Raft and Kv
 //	Engines *engine_util.Engines
@@ -308,17 +308,34 @@ package raftstore
 //// never be committed
 //func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 //	// Your Code Here (2B).
-//	entryLastIndex := entries[len(entries)-1].GetIndex()
-//	prevLastIndex := ps.raftState.LastIndex
-//	for i := entryLastIndex + 1; i <= prevLastIndex; i++ {
-//		raftWB.DeleteMeta(meta.RaftLogKey(ps.region.Id, i))
+//	if len(entries) == 0 {
+//		return nil
 //	}
+//
+//	first, _ := ps.FirstIndex()
+//	last := entries[len(entries)-1].Index
+//
+//	// shortcut if there is no new entry.
+//	if last < first {
+//		return nil
+//	}
+//	// truncate compacted entries
+//	if first > entries[0].Index {
+//		entries = entries[first-entries[0].Index:]
+//	}
+//
+//	regionId := ps.region.GetId()
 //	for _, entry := range entries {
-//		err := raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, entry.GetIndex()), &entry)
-//		if err != nil {
-//			return err
+//		raftWB.SetMeta(meta.RaftLogKey(regionId, entry.Index), &entry)
+//	}
+//	prevLast, _ := ps.LastIndex()
+//	if prevLast > last {
+//		for i := last + 1; i <= prevLast; i++ {
+//			raftWB.DeleteMeta(meta.RaftLogKey(regionId, i))
 //		}
 //	}
+//	ps.raftState.LastIndex = last
+//	ps.raftState.LastTerm = entries[len(entries)-1].Term
 //	return nil
 //}
 //
@@ -334,7 +351,34 @@ package raftstore
 //	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 //	// and ps.clearExtraData to delete stale data
 //	// Your Code Here (2C).
-//	return nil, nil
+//	if ps.isInitialized() {
+//		if err := ps.clearMeta(kvWB, raftWB); err != nil {
+//			return nil, err
+//		}
+//		ps.clearExtraData(snapData.Region)
+//	}
+//
+//	ps.raftState.LastIndex = snapshot.Metadata.Index
+//	ps.raftState.LastTerm = snapshot.Metadata.Term
+//	ps.applyState.AppliedIndex = snapshot.Metadata.Index
+//	ps.applyState.TruncatedState.Index = snapshot.Metadata.Index
+//	ps.applyState.TruncatedState.Term = snapshot.Metadata.Term
+//	ps.snapState.StateType = snap.SnapState_Applying
+//	kvWB.SetMeta(meta.ApplyStateKey(snapData.Region.GetId()), ps.applyState)
+//
+//	ch := make(chan bool, 1)
+//	ps.regionSched <- &runner.RegionTaskApply{
+//		RegionId: snapData.Region.GetId(),
+//		Notifier: ch,
+//		SnapMeta: snapshot.Metadata,
+//		StartKey: snapData.Region.GetStartKey(),
+//		EndKey:   snapData.Region.GetEndKey(),
+//	}
+//	<-ch
+//
+//	result := &ApplySnapResult{PrevRegion: ps.region, Region: snapData.Region}
+//	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
+//	return result, nil
 //}
 //
 //// Save memory states to disk.
@@ -342,29 +386,21 @@ package raftstore
 //func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 //	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 //	// Your Code Here (2B/2C).
+//	raftWB := new(engine_util.WriteBatch)
+//	var result *ApplySnapResult
 //	var err error
-//	wb := new(engine_util.WriteBatch)
-//
-//	// 保存entry
-//	ps.Append(ready.Entries, wb)
-//
-//	// 保存hardstate
+//	if !raft.IsEmptySnap(&ready.Snapshot) {
+//		kvWB := new(engine_util.WriteBatch)
+//		result, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+//		kvWB.WriteToDB(ps.Engines.Kv)
+//	}
+//	ps.Append(ready.Entries, raftWB)
 //	if !raft.IsEmptyHardState(ready.HardState) {
 //		ps.raftState.HardState = &ready.HardState
-//		err = wb.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
-//		if err != nil {
-//			panic("SaveReadyState wrong set")
-//		}
 //	}
-//
-//	err = ps.Engines.WriteRaft(wb)
-//	if err != nil {
-//		panic("SaveReadyState wrong append")
-//	}
-//
-//	// TODO 2B
-//	applySnapResult := new(ApplySnapResult)
-//	return applySnapResult, nil
+//	raftWB.SetMeta(meta.RaftStateKey(ps.region.GetId()), ps.raftState)
+//	raftWB.WriteToDB(ps.Engines.Raft)
+//	return result, err
 //}
 //
 //func (ps *PeerStorage) ClearData() {

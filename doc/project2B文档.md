@@ -1,4 +1,4 @@
-# 项目2B
+# 项目2B及其天坑
 
 > 实现storage
 >
@@ -13,8 +13,8 @@
 + peer：手上有一个raft副本
 + 前缀：数据z，元数据0x01
 + 元数据前缀：
-  + 0x01 集群，存储id信息 
-  + 0x02 region信息 log index raft本地状态 raftapply状态 
+  + 0x01 集群，存储id信息
+  + 0x02 region信息 log index raft本地状态 raftapply状态
   + 0x03 region id本地状态
 + command
   + 读：leaseread
@@ -66,8 +66,8 @@
 + 看RaftStorage
 + raftWorker
 + 流程
-    + 工人：raftCh获取信息，包括tick，proposed的cmd
-    + 处理ready，发送msg，持久化，apply 
+  + 工人：raftCh获取信息，包括tick，proposed的cmd
+  + 处理ready，发送msg，持久化，apply
 
 ## 2BA
 
@@ -79,11 +79,11 @@
 + 看kv/raftstore/meta
 + 元数据 PeerStorage
 + 就实现一个功能 PeerStorage.SaveReadyState
-    + 保存ready中的数据，包括entries和硬状态
-    + entries直接append到ready
-    + 删除过去append的但是不会commit的
-    + 更新RaftLocalState并且保存到raftdb
-    + 更新`RaftLocalState.HardState`，保存到raftdb
+  + 保存ready中的数据，包括entries和硬状态
+  + entries直接append到ready
+  + 删除过去append的但是不会commit的
+  + 更新RaftLocalState并且保存到raftdb
+  + 更新`RaftLocalState.HardState`，保存到raftdb
 + 使用writebatch
 + 看peer_storage.go
 + 设置log环境变量LOG_LEVEL=debug
@@ -185,7 +185,7 @@
   + ErrStaleCommand 没有commit的日志被重写了（这会发生吗？不应该commit才返回？）
 + admin的先不管
 + 集中处理非admin的命令
-+ 
++
 
 ### HandleRaftReady
 
@@ -202,47 +202,52 @@
 
 ### TestBasic2B
 
-+ panic: request timeout
++ bug1：panic: request timeout
+
   + 看了下是mustPut函数超时
   + 最终调用的是Request函数
   + 请求5s就算超时
   + 会走到router发送一个raftMsg给peer
   + 超时是在WaitRespWithTimeout
   + 接收cb.done里面的消息，然后done迟迟没有消息来
-  
-+ panic: remove /tmp/test-raftstore1638636090/snap/gen_1_5_5_lock.sst.tmp: no such file or directory [recovered]                     panic: remove /tmp/test-raftstore1638636090/snap/gen_1_5_5_lock.sst.tmp: no such file or directory  
+
++ bug2：panic: remove /tmp/test-raftstore1638636090/snap/gen_1_5_5_lock.sst.tmp: no such file or directory [recovered]                     panic: remove /tmp/test-raftstore1638636090/snap/gen_1_5_5_lock.sst.tmp: no such file or directory
+
   + 追溯一下
   + err := c.simulator.RunStore(c.cfg, engine, context.TODO())
-  + 	err := node.Start(ctx, engine, c.trans, snapManager)
-  + 	追不上去了 找不到哪的问题
-  
-+ panic: len(resp.Responses) != 1 
-  
+  + err := node.Start(ctx, engine, c.trans, snapManager)
+  + 追不上去了 找不到哪的问题
+
++ bug3：panic: len(resp.Responses) != 1
+
   + 调用Scan的时候，起手会有个Snap的请求
   + 如果这个请求返回不为1则报错，那么只需要收到Snap的时候返回一个response就行
-  
-+ [error] failed to generate snapshot!!!, [regionId: 1, err : stat /tmp/test-raftstore2587279877/snap/gen_1_5_5_default.sst.tmp: no such file or directory]
+
++ bug4：[error] failed to generate snapshot!!!, [regionId: 1, err : stat /tmp/test-raftstore2587279877/snap/gen_1_5_5_default.sst.tmp: no such file or directory]
+
   + 	暂时没管
   + 	file, err = os.OpenFile(cfFile.TmpPath, os.O_CREATE|os.O_WRONLY, 0600)一路追到这 不能open 是权限问题吗？
-  
-+ test_test.go:44: failure                                                                                                      panic: runtime error: invalid memory address or nil pointer dereference    
+
++ bug5：test_test.go:44: failure                                                                                                      panic: runtime error: invalid memory address or nil pointer dereference
 
   + 	snap命令没有返回txn 导致txn是个空指针
 
-+ [fatal] get wrong value, client 0                                                    
-
-+ want:x 0 0 y                                                                                                                      got:                                                                                                                                                                        
-
++ bug6：[fatal] get wrong value, client 0 want:x 0 0 y                                                                                                                      got:
   + 感觉是幂等性的问题
   + 底层存储kv的格式是：就是kv
-+ 很奇怪的是 后面的测试有些能够正确输出一部分结果，然后有一部分突然被截断，之前的丢失，只有之后的
+  + 很奇怪的是 后面的测试有些能够正确输出一部分结果，然后有一部分突然被截断，之前的丢失，只有之后的
   + 现在有两个可能
     + 第一个put没有写入到db中
     + 第二个snap没有正确的获取快照
       + 跟踪一下 感觉和失败生成快照错误有有关
-  
-  ​    
-
++ bug7：find no region for xxxx
+  + see the blog of pingcap
+  + because the leader election fail
+  + 看了下r.msg，里面的消息根本没有被消费，这怎么可能好使？
+  + 拷贝一个正确答案看一下
++ bug8：want:x 0 0 yx 0 1 yx 0 2 y
+  got: x 0 0 yx 0 1 yx 0 1 yx 0 1 yx 0 2 yx 0 2 y
+  + 没考虑幂等性
 
 ## 过程中遇到的问题
 
@@ -257,3 +262,44 @@
 + 如何保证d.proposal[0]就是对应的entry的callback？
 + cluster.Scan是取了个快照回来进行的扫描
 + snap命令到底做了什么
+
+## 天坑
+
+### 天坑1
+
++ 事情是这样子的，就是发现2B的所有Test经常会出现丢日志的情况
++ 具体表现就是日志的value可能第一个就添加到kvdb中失败或者出现中途突然之前的日志被截断
++ 但是通过WAL发现每次请求是写入到了WriteBatch里面了的，并且最后也执行过了
++ 那么问题就很奇怪了就只有两个原因
+  + writeBatch写入有问题
+  + 每次scan读取的snap有问题
++ 但是这俩都很难排查，感觉跟本不是我这一层的问题
++ 知道看了 [project2b中，使用engine_util.PutCF接口添加的数据，经常获取失败导致 - 学习与认证 - AskTUG](https://asktug.com/t/topic/273613/13)
++ 老哥提到，是没有在初始化的时候，初始化peer的配置文件，导致一直是单机状态运行
++ 我一看！情况一模一样！无语
++ 原来是2A没有测试多服务器的情况，但是2B上来就是3-5台，而且关于这个没有任何报错……
++ 各位遇到这种情况可以看看newRaft函数
+
+### 天坑2
+
++ 选举一直失败
++ 发现是send了vote消息
++ 但是一直没有人收到
++ 跟踪了消息队列msgs，发现消息根本没有发送出去
++ 看了下别人的代码 才发现在获取ready的时候需要把msgs全取出来
++ 在advance之前发送出去
++ 啊对对对对对
+
+### 天坑3
+
++ 日志等级怎么调整？
++ 搜了半天LOG_LEVEL发现无用
++ 看了代码发现是要设置环境变量为error（比如才有用）
++ 如 export LOG_LEVEL=error 无语
++ 就算是该了代码里面的else都没用 一定要这么搞
+
+### 天坑4
+
++ 运行空间不足
++ 一看tmp文件夹 创建了几十个临时文件夹 一个500MB
++ 要经常清理 很麻烦

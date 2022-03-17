@@ -151,6 +151,7 @@ func (rn *RawNode) Ready() Ready {
 	ready := Ready{
 		Entries:          r.RaftLog.unstableEntries(),
 		CommittedEntries: r.RaftLog.entries[r.RaftLog.getIndex(r.RaftLog.applied+1):r.RaftLog.getIndex(r.RaftLog.committed+1)],
+		Messages:         r.msgs,
 	}
 	soft := &SoftState{Lead: r.Lead, RaftState: r.State}
 	hard := pb.HardState{Term: r.Term, Vote: r.Vote, Commit: r.RaftLog.committed}
@@ -160,6 +161,7 @@ func (rn *RawNode) Ready() Ready {
 	if !equals(hard, rn.CurrentReady.HardState) {
 		ready.HardState = hard
 	}
+	r.msgs = make([]pb.Message, 0)
 	return ready
 }
 
@@ -174,9 +176,11 @@ func equals(hard1 pb.HardState, hard2 pb.HardState) bool {
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
-	ready := rn.Ready()
-	return len(ready.Entries) > 0 || len(ready.CommittedEntries) > 0 ||
-		ready.SoftState != nil || !IsEmptyHardState(ready.HardState)
+	r := rn.Raft
+	soft := &SoftState{Lead: r.Lead, RaftState: r.State}
+	hard := pb.HardState{Term: r.Term, Vote: r.Vote, Commit: r.RaftLog.committed}
+	return len(r.RaftLog.unstableEntries()) > 0 || len(r.RaftLog.entries[r.RaftLog.getIndex(r.RaftLog.applied+1):r.RaftLog.getIndex(r.RaftLog.committed+1)]) > 0 || len(r.msgs) > 0 ||
+		!soft.equals(rn.CurrentReady.SoftState) || (!isHardStateEqual(hard, rn.CurrentReady.HardState) && !IsEmptyHardState(hard))
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the

@@ -176,7 +176,10 @@ func newRaft(c *Config) *Raft {
 		heartbeatTimeout: c.HeartbeatTick,
 		RaftLog:          newLog(c.Storage),
 	}
-	hardState, _, _ := r.RaftLog.storage.InitialState()
+	hardState, conf, _ := r.RaftLog.storage.InitialState()
+	if c.peers == nil{
+		c.peers = conf.GetNodes()
+	}
 	r.Term = hardState.GetTerm()
 	r.RaftLog.committed = hardState.GetCommit()
 	r.Vote = hardState.GetVote()
@@ -337,6 +340,7 @@ func (r *Raft) tickHeartbeat() {
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).\
+	//log.Infof("%v become follower!", r.id)
 	r.resetState()
 	r.Lead = lead
 	r.Term = term
@@ -347,6 +351,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
+	//log.Infof("%v become candidate!", r.id)
 	r.resetState()
 	r.Term++
 	r.State = StateCandidate
@@ -368,6 +373,7 @@ func (r *Raft) startElection() {
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+	//log.Infof("%v become leader!", r.id)
 	r.resetState()
 	r.State = StateLeader
 	r.Lead = r.id
@@ -580,6 +586,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 }
 
 func (r *Raft) handleRequestVote(m pb.Message) {
+	//log.Infof("%v receive the vote of %v", r.id, m.GetFrom())
 	if r.Term > m.GetTerm() {
 		r.sendVoteResponse(m.GetFrom(), true)
 		return
@@ -670,3 +677,4 @@ func (r *Raft) resetState() {
 	r.heartbeatElapsed = 0
 	r.randomElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
 }
+
