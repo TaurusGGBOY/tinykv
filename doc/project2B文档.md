@@ -198,6 +198,24 @@
 + 看了下其他地方有ready advanced的地方
 + 就直接ready->Append->Advance就完事儿了
 
+### proposal的处理
+
++ 很坑，中途基本上没有提到proposal的处理，找了半天，以及参考了代码，找到了描述信息
++ In this stage, you may consider these errors, and others will be processed in project3: ErrNotLeader，ErrStaleCommand 
++ 就是上面这一句提到了怎么处理proposal
++ 要处理proposal的原因：
+  + proposal保存的时候就是直接追加到尾部，所以proposal本身是有线性性质的
+  + 但是proposal和entry是不是一一对应的状态呢？不好意思，不是
+  + 为什么，因为entry不一定会全部被commit，只有commit之后，准备apply了，才会调用proposal里面的callback
+  + 所以说，如果对于所有的commitLog Index，一个proposal我们有以下处理方式
+    + entry.index < proposal.Index：不可能出现，弹出一个entry的时候，至少弹出一个proposal
+    + entry.index > proposal.Index：之前的proposal都过期了，可能已经被覆盖掉了，这些都可以返回ErrStaleCommand
+    + entry.index = proposal.Index：分情况考虑
+      + entry.Term = proposal.Term：就是这个回调，用就可以了
+      + entry.Term < proposal.Term：同一个index可能在多个term被propose了，但是前面的没被返回，返回ErrStaleCommand
+      + entry.Term > proposal.Term：乱序rpc导致后面term的proposal提前传过来了，返回ErrStaleCommand
+
+
 ## 测试脚本
 
 ### TestBasic2B
@@ -248,6 +266,48 @@
 + bug8：want:x 0 0 yx 0 1 yx 0 2 y
   got: x 0 0 yx 0 1 yx 0 1 yx 0 1 yx 0 2 yx 0 2 y
   + 没考虑幂等性
+  + 看了下日志 很奇怪，感觉是leader在收到了put消息之后马上就commit了，但是其他1/2的成员根本还没有commit，所以感觉是commit了两次，这样就apply了两次
+  + 不对 本来就是put之后马上response，所以不是这个问题
+  + 哦 再次反转 process是要在commit之后再调用，说明了是先commit再process，所以上面的顺序是对的，但是为什么会有重复日志还是不清楚
+  + 弯路原因：貌似找到原因了 put之后还没有写入到db中，就来了个snapshot，结果先跑去执行snapshot（或者说并行执行），这个时候hasReady依然为true，导致ready重复消费
+  + 弯路深究：在调用snapshot的时候没有更新applyIndex，跟这个有关？
+  + 弯路解决：在写入wb之前都更新了applyIndex
+  + 好象是propose的问题，查看前一章proposal的部分
+    + 处理了，发现不是，因为proposal callback只影响response，不应该影响kvdb里面的值
+  + 又改了下Append里面的ps.raftState
+  + 定位到了是wb在snapshot的时候没有清空
+
+### TestUnreliable2B
++ bug1:panic: resp.Responses[0].CmdType != raft_cmdpb.CmdType_Put
+  + 输出了一下，发现proposal有问题……经常有错误的index和term的日志的proposal
+  + 参考了一下个各位的代码 发现他们的做法是直接不处理Index相同但是term不相同的（？等待超时？）
++ bug2:panic: remove /tmp/test-raftstore194857741/snap/gen_1_5_5.meta.tmp: no such file or directory
+  + 尝试直接改代码跳过这个错误
+  + 放弃了 跑单测吧
+  + --- FAIL: TestOnePartition2B (0.18s) 通过
+    --- FAIL: TestPersistConcurrent2B (0.14s) 通过
+    --- FAIL: TestPersistPartition2B (0.23s)
+  + 还是会经常有tmp无法remove的问题，怀疑是权限问题？应该用sudo去跑
+  
+### TestPersistPartition2B
++ panic: runtime error: index out of range [18446744073709551611] with length 461
+  + handleAppendEntriesResponse都发生在这
+  + 没有处理快回退，而是直接回退到match+1上
+  + sendAppend的时候 有时候没带Index带了个None
+  + r.sendAppendResponse(m.GetFrom(), m.GetIndex()-1, true)这一句的问题吧 不能这样回退 要回退到相同term的第一个Index
+  + 特判appendResponse的index为None时直接return
+
+### TestLeaderIncreaseNext2ABTestLeaderIncreaseNext2AB
++ 中途2a出现bug1 raft_test.go:995: next = 4, want 6
++ 看日志的意思是 已经有3个日志，然后加上一个空日志，加上一个propose的日志，下一次的next应该为6
++ 但是我是4 说明只发完了第三个
++ 解决：r.sendAppendResponse(m.GetFrom(), r.RaftLog.LastIndex() + 1, None, true)
++ 上一句必须是返回lastIndex+1 而不是lastIndex
+
+### version "go1.16.3" does not match go tool version "go1.13.8"
+  + 
+## 结果
+![](https://gitee.com/agaogao/photobed/raw/master/img/20220322152330.png)
 
 ## 过程中遇到的问题
 
@@ -259,9 +319,22 @@
   + msg.unMarshal
 + msg的req里面怎么存的
   + 只用管第一个？
+  + 根据MustPutCF的代码，可以看到只放了一个req进去
+  + 并且只查了一个response[0]
 + 如何保证d.proposal[0]就是对应的entry的callback？
+  + 需要自己却确保
 + cluster.Scan是取了个快照回来进行的扫描
 + snap命令到底做了什么
+
+
+## 小技巧
+
+### 如何区别writeBatch中的leader的日志
++ 很坑 因为id是private，所以无法在rawnode层打印id信息
++ 可以把writeBatch里面的日志data打印出来
+  +  leader的：key:default_2 00000000�������� value:x 2 0 y
+  +  follower的：key:default_2 00000000 value:x 2 0 y
++ 目测原因是leader的key后面带了txn相关的东西
 
 ## 天坑
 

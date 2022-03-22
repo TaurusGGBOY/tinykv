@@ -42,37 +42,35 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 }
 
 func (d *peerMsgHandler) HandleRaftReady() {
-	if d.stopped {
+	if d.stopped || !d.RaftGroup.HasReady() {
 		return
 	}
 	log.Debug("Entry HandleRaftReady")
 	// Your Code Here (2B).
-	if d.RaftGroup.HasReady() {
-		rd := d.RaftGroup.Ready()
-		state, err := d.peerStorage.SaveReadyState(&rd)
-		if err != nil {
-			panic(nil)
-		}
-		// TODO
-		if state != nil {
-			log.Debug("state will be store in the future")
-		}
-		// 读取消息队列
-		//log.Infof("ggb: send all msg len %v", len(rd.Messages))
-		d.Send(d.ctx.trans, rd.Messages)
+	rd := d.RaftGroup.Ready()
+	// 最后执行advance
+	defer d.RaftGroup.Advance(rd)
 
-		// 处理完统一batch写入
-		wb := new(engine_util.WriteBatch)
-		for _, entry := range rd.CommittedEntries {
-			d.process(entry, wb)
-		}
-		log.Infof("ggb: start to write to db, entry len: %d", wb.Len())
-		err = wb.WriteToDB(d.peer.peerStorage.Engines.Kv)
-		if err != nil {
-			panic(err)
-		}
-		d.RaftGroup.Advance(rd)
+	d.peerStorage.SaveReadyState(&rd)
+
+	// 读取消息队列
+	//log.Infof("ggb: send all msg len %v", len(rd.Messages))
+	d.Send(d.ctx.trans, rd.Messages)
+
+	// 处理完统一batch写入
+	if len(rd.CommittedEntries) == 0 {
+		return
 	}
+
+	for _, entry := range rd.CommittedEntries {
+		d.process(entry)
+	}
+	wb := new(engine_util.WriteBatch)
+	d.peer.peerStorage.applyState.AppliedIndex = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
+	wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+	log.Infof("ggb: start to write to db, entry len: %d", wb.Len())
+	wb.WriteToDB(d.peer.peerStorage.Engines.Kv)
+
 	log.Debug("Exit HandleRaftReady")
 }
 
@@ -165,7 +163,6 @@ func (d *peerMsgHandler) handleMsgRequest(msg *raft_cmdpb.RaftCmdRequest, cb *me
 		panic(err)
 	}
 	// 用来保存回调
-	// TODO 回调什么时候调用呢？
 	d.peer.proposals = append(d.peer.proposals, &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb})
 	d.peer.RaftGroup.Propose(data)
 }
@@ -607,7 +604,7 @@ func (d *peerMsgHandler) onGCSnap(snaps []snap.SnapKeyWithSending) {
 
 // commited的日志就要apply到状态机中
 // 但是是不是apply到状态机中就行？不用管applyIndex吗？
-func (d *peerMsgHandler) process(entry eraftpb.Entry, wb *engine_util.WriteBatch) {
+func (d *peerMsgHandler) process(entry eraftpb.Entry) {
 	msg := &raft_cmdpb.RaftCmdRequest{}
 	err := msg.Unmarshal(entry.Data)
 	if err != nil {
@@ -616,8 +613,12 @@ func (d *peerMsgHandler) process(entry eraftpb.Entry, wb *engine_util.WriteBatch
 	if len(msg.Requests) <= 0 {
 		return
 	}
-	req := msg.Requests[0]
 
+	wb := new(engine_util.WriteBatch)
+	defer wb.WriteToDB(d.peerStorage.Engines.Kv)
+
+	// TODO 这里为什么req只读第一个就行
+	req := msg.Requests[0]
 	// 设置batch
 	switch req.GetCmdType() {
 	case raft_cmdpb.CmdType_Invalid:
@@ -626,6 +627,11 @@ func (d *peerMsgHandler) process(entry eraftpb.Entry, wb *engine_util.WriteBatch
 	case raft_cmdpb.CmdType_Put:
 		wb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
 		log.Infof("ggb: put:%v, %v", string(req.Put.Key), string(req.Put.GetValue()))
+
+		value, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Put.Cf, req.Put.Key)
+		if err == nil {
+			log.Infof("ggb: get the put :%v, %v", string(req.Put.Key), string(value))
+		}
 	case raft_cmdpb.CmdType_Delete:
 		wb.DeleteCF(req.Delete.Cf, req.Delete.Key)
 		log.Infof("ggb: delete:%v", string(req.Delete.Key))
@@ -635,15 +641,37 @@ func (d *peerMsgHandler) process(entry eraftpb.Entry, wb *engine_util.WriteBatch
 		panic("wrong cmd type")
 	}
 
+	// 删除不合法proposal
+	i := 0
+	for _, p := range d.proposals {
+		if p.index >= entry.GetIndex() {
+			break
+		}
+		ErrRespStaleCommand(entry.GetTerm())
+		i++
+	}
+	d.proposals = d.proposals[i:]
+
 	if len(d.proposals) <= 0 {
 		log.Info("ggb: proposal len == 0")
 		return
 	}
 	// 返回response
 	p := d.proposals[0]
-	// TODO 先不考虑幂等性
+	defer func(){
+		d.proposals = d.proposals[1:]
+	}()
+	if p.index != entry.Index || p.term != entry.Term{
+		ErrRespStaleCommand(entry.GetTerm())
+		return
+	}
 	// 设置回复
 	resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
+	defer p.cb.Done(resp)
+
+	if p.index!=entry.GetIndex() || p.term != entry.GetTerm() {
+		panic("wrong index term ")
+	}
 	switch req.GetCmdType() {
 	case raft_cmdpb.CmdType_Invalid:
 	case raft_cmdpb.CmdType_Get:
@@ -685,11 +713,11 @@ func (d *peerMsgHandler) process(entry eraftpb.Entry, wb *engine_util.WriteBatch
 		log.Infof("ggb: snapshot response")
 		resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Snap, Snap: &raft_cmdpb.SnapResponse{Region: d.Region()}}}
 		p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+		wb = new(engine_util.WriteBatch)
 	default:
 		panic("wrong cmd type")
 	}
-	p.cb.Done(resp)
-	d.proposals = d.proposals[1:]
+
 }
 
 func newAdminRequest(regionID uint64, peer *metapb.Peer) *raft_cmdpb.RaftCmdRequest {

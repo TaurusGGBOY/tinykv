@@ -128,3 +128,7 @@ func (l *RaftLog) getIndex(index uint64) uint64 {
 func (l *RaftLog) getByIndex(index uint64) *pb.Entry {
 	return &l.entries[l.getIndex(index)]
 }
+
+func (l *RaftLog) toGlobalIndex(index uint64) uint64 {
+	return index + l.first
+}

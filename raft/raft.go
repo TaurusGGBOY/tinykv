@@ -16,8 +16,10 @@ package raft
 
 import (
 	"errors"
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"math/rand"
+	"sort"
 	"time"
 )
 
@@ -172,25 +174,23 @@ func newRaft(c *Config) *Raft {
 	r := Raft{
 		id:               c.ID,
 		State:            StateFollower,
+		Prs:              make(map[uint64]*Progress),
 		electionTimeout:  c.ElectionTick,
 		heartbeatTimeout: c.HeartbeatTick,
 		RaftLog:          newLog(c.Storage),
 	}
 	hardState, conf, _ := r.RaftLog.storage.InitialState()
-	if c.peers == nil{
+	if c.peers == nil {
 		c.peers = conf.GetNodes()
 	}
-	r.Term = hardState.GetTerm()
-	r.RaftLog.committed = hardState.GetCommit()
-	r.Vote = hardState.GetVote()
-
-	r.Prs = make(map[uint64]*Progress)
+	r.Term, r.RaftLog.committed, r.Vote = hardState.GetTerm(), hardState.GetCommit(), hardState.GetVote()
 	lastIndex := r.RaftLog.LastIndex()
+	log.Infof("ggb: restart lastindex %v", lastIndex)
 	for _, i := range c.peers {
 		r.Prs[i] = &Progress{Match: 0, Next: lastIndex + 1}
 	}
-	r.Prs[r.id] = &Progress{Match: 0, Next: lastIndex + 1}
-	r.Prs[r.id].Match = lastIndex
+	r.Prs[r.id] = &Progress{Match: lastIndex, Next: lastIndex + 1}
+
 	r.resetState()
 	return &r
 }
@@ -216,7 +216,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 	return true
 }
 
-func (r *Raft) sendAppendResponse(to uint64, index uint64, reject bool) {
+func (r *Raft) sendAppendResponse(to uint64, index uint64, term uint64, reject bool) {
 	// Your Code Here (2A).
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
@@ -224,6 +224,7 @@ func (r *Raft) sendAppendResponse(to uint64, index uint64, reject bool) {
 		From:    r.id,
 		To:      to,
 		Index:   index,
+		LogTerm: term,
 		Reject:  reject,
 	}
 	r.msgs = append(r.msgs, msg)
@@ -373,7 +374,7 @@ func (r *Raft) startElection() {
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
-	//log.Infof("%v become leader!", r.id)
+	log.Infof("%v become leader!", r.id)
 	r.resetState()
 	r.State = StateLeader
 	r.Lead = r.id
@@ -465,7 +466,7 @@ func (r *Raft) leaderHandler(m pb.Message) error {
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
 	if m.GetTerm() < r.Term {
-		r.sendAppendResponse(m.GetFrom(), None, true)
+		r.sendAppendResponse(m.GetFrom(), None, None, true)
 		return
 	}
 
@@ -474,12 +475,15 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	}
 
 	if m.GetIndex() > r.RaftLog.LastIndex() {
-		r.sendAppendResponse(m.GetFrom(), r.RaftLog.LastIndex(), true)
+		r.sendAppendResponse(m.GetFrom(), r.RaftLog.LastIndex() + 1, None, true)
 		return
 	}
 
-	if term, _ := r.RaftLog.Term(m.GetIndex()); term != m.GetLogTerm() {
-		r.sendAppendResponse(m.GetFrom(), m.GetIndex()-1, true)
+	if term, _ := r.RaftLog.Term(m.GetIndex()); m.GetIndex() >= r.RaftLog.FirstIndex() && term != m.GetLogTerm() {
+		index := sort.Search(int(r.RaftLog.getIndex(m.GetIndex()+1)), func(i int) bool {
+			return r.RaftLog.entries[i].Term == term
+		})
+		r.sendAppendResponse(m.GetFrom(), r.RaftLog.toGlobalIndex(uint64(index)), term, true)
 		return
 	}
 
@@ -503,7 +507,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if m.GetCommit() > r.RaftLog.committed {
 		r.RaftLog.committed = min(m.GetCommit(), m.GetIndex()+uint64(len(m.Entries)))
 	}
-	r.sendAppendResponse(m.GetFrom(), r.RaftLog.LastIndex(), false)
+	r.sendAppendResponse(m.GetFrom(), r.RaftLog.LastIndex(), None, false)
 }
 
 func (r *Raft) handHeartbeatResponse(m pb.Message) {
@@ -525,7 +529,16 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		return
 	}
 	if m.Reject {
-		r.Prs[m.GetFrom()].Next = r.Prs[m.GetFrom()].Match + 1
+		if m.GetIndex() == None {
+			return
+		}
+		index := m.GetIndex()
+		if m.GetLogTerm() != None {
+			index = uint64(sort.Search(len(r.RaftLog.entries), func(i int) bool {
+				return r.RaftLog.entries[i].Term > m.GetLogTerm()
+			}))
+		}
+		r.Prs[m.GetFrom()].Next = index
 		r.sendAppend(m.GetFrom())
 		return
 	}
@@ -555,6 +568,7 @@ func (r *Raft) PushUpCommit() {
 		}
 		term, _ := r.RaftLog.Term(i)
 		if term == r.Term {
+			log.Infof("leader commit %v at term %v", string(r.RaftLog.getByIndex(i).GetData()), term)
 			r.RaftLog.committed = i
 			shouldBeat = true
 		}
@@ -677,4 +691,3 @@ func (r *Raft) resetState() {
 	r.heartbeatElapsed = 0
 	r.randomElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
 }
-
