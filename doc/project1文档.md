@@ -185,7 +185,9 @@ type Server struct {
 
 + 获取iter
 + 按照req要求进行迭代（开始地址，limit等）
-+ 
+
+## 结果
+![](https://gitee.com/agaogao/photobed/raw/master/img/20220323095852.png)
 
 ## 想法
 

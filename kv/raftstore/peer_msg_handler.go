@@ -618,105 +618,107 @@ func (d *peerMsgHandler) process(entry eraftpb.Entry) {
 	defer wb.WriteToDB(d.peerStorage.Engines.Kv)
 
 	// TODO 这里为什么req只读第一个就行
-	req := msg.Requests[0]
-	// 设置batch
-	switch req.GetCmdType() {
-	case raft_cmdpb.CmdType_Invalid:
-	case raft_cmdpb.CmdType_Get:
-		log.Infof("ggb: get:%v", string(req.Get.Key))
-	case raft_cmdpb.CmdType_Put:
-		wb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
-		log.Infof("ggb: put:%v, %v", string(req.Put.Key), string(req.Put.GetValue()))
+	for _, req := range msg.Requests {
+		// 设置batch
+		switch req.GetCmdType() {
+		case raft_cmdpb.CmdType_Invalid:
+		case raft_cmdpb.CmdType_Get:
+			log.Infof("ggb: get:%v", string(req.Get.Key))
+		case raft_cmdpb.CmdType_Put:
+			wb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+			log.Infof("ggb: put:%v, %v", string(req.Put.Key), string(req.Put.GetValue()))
 
-		value, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Put.Cf, req.Put.Key)
-		if err == nil {
-			log.Infof("ggb: get the put :%v, %v", string(req.Put.Key), string(value))
+			value, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Put.Cf, req.Put.Key)
+			if err == nil {
+				log.Infof("ggb: get the put :%v, %v", string(req.Put.Key), string(value))
+			}
+		case raft_cmdpb.CmdType_Delete:
+			wb.DeleteCF(req.Delete.Cf, req.Delete.Key)
+			log.Infof("ggb: delete:%v", string(req.Delete.Key))
+		case raft_cmdpb.CmdType_Snap:
+			log.Info("ggb: Request Snapshot")
+		default:
+			panic("wrong cmd type")
 		}
-	case raft_cmdpb.CmdType_Delete:
-		wb.DeleteCF(req.Delete.Cf, req.Delete.Key)
-		log.Infof("ggb: delete:%v", string(req.Delete.Key))
-	case raft_cmdpb.CmdType_Snap:
-		log.Info("ggb: Request Snapshot")
-	default:
-		panic("wrong cmd type")
+
+		// 删除不合法proposal
+		i := 0
+		for _, p := range d.proposals {
+			if p.index >= entry.GetIndex() {
+				break
+			}
+			ErrRespStaleCommand(entry.GetTerm())
+			i++
+		}
+		d.proposals = d.proposals[i:]
+
+		if len(d.proposals) <= 0 {
+			log.Info("ggb: proposal len == 0")
+			return
+		}
+		// 返回response
+		p := d.proposals[0]
+		defer func(){
+			d.proposals = d.proposals[1:]
+		}()
+		if p.index != entry.Index || p.term != entry.Term{
+			ErrRespStaleCommand(entry.GetTerm())
+			return
+		}
+		// 设置回复
+		resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
+		defer p.cb.Done(resp)
+
+		if p.index!=entry.GetIndex() || p.term != entry.GetTerm() {
+			panic("wrong index term ")
+		}
+		switch req.GetCmdType() {
+		case raft_cmdpb.CmdType_Invalid:
+		case raft_cmdpb.CmdType_Get:
+			// 因为要写入之前的batch 所以包括自己在内都可以apply了
+			d.peer.peerStorage.applyState.AppliedIndex = entry.Index
+			err := wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+			if err != nil {
+				panic(err)
+			}
+			log.Infof("ggb: get start to write to db, entry len: %d", wb.Len())
+			err = wb.WriteToDB(d.peerStorage.Engines.Kv)
+			if err != nil {
+				panic(err)
+			}
+			value, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
+			if err != nil {
+				panic(err)
+			}
+			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Get, Get: &raft_cmdpb.GetResponse{Value: value}}}
+			// 这个wb必须要是作为参数传下来，不然前面的还是指向的错误的地址
+			wb = new(engine_util.WriteBatch)
+		case raft_cmdpb.CmdType_Put:
+			log.Infof("ggb: put response :%v, %v", string(req.Put.Key), string(req.Put.GetValue()))
+			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Put, Put: new(raft_cmdpb.PutResponse)}}
+		case raft_cmdpb.CmdType_Delete:
+			log.Infof("ggb: delete response")
+			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Delete, Delete: new(raft_cmdpb.DeleteResponse)}}
+		case raft_cmdpb.CmdType_Snap:
+			d.peer.peerStorage.applyState.AppliedIndex = entry.Index
+			err := wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+			if err != nil {
+				panic(err)
+			}
+			log.Infof("ggb: snapshot start to write to db, entry len: %d", wb.Len())
+			err = wb.WriteToDB(d.peerStorage.Engines.Kv)
+			if err != nil {
+				panic(err)
+			}
+			log.Infof("ggb: snapshot response")
+			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Snap, Snap: &raft_cmdpb.SnapResponse{Region: d.Region()}}}
+			p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+			wb = new(engine_util.WriteBatch)
+		default:
+			panic("wrong cmd type")
+		}
 	}
 
-	// 删除不合法proposal
-	i := 0
-	for _, p := range d.proposals {
-		if p.index >= entry.GetIndex() {
-			break
-		}
-		ErrRespStaleCommand(entry.GetTerm())
-		i++
-	}
-	d.proposals = d.proposals[i:]
-
-	if len(d.proposals) <= 0 {
-		log.Info("ggb: proposal len == 0")
-		return
-	}
-	// 返回response
-	p := d.proposals[0]
-	defer func(){
-		d.proposals = d.proposals[1:]
-	}()
-	if p.index != entry.Index || p.term != entry.Term{
-		ErrRespStaleCommand(entry.GetTerm())
-		return
-	}
-	// 设置回复
-	resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
-	defer p.cb.Done(resp)
-
-	if p.index!=entry.GetIndex() || p.term != entry.GetTerm() {
-		panic("wrong index term ")
-	}
-	switch req.GetCmdType() {
-	case raft_cmdpb.CmdType_Invalid:
-	case raft_cmdpb.CmdType_Get:
-		// 因为要写入之前的batch 所以包括自己在内都可以apply了
-		d.peer.peerStorage.applyState.AppliedIndex = entry.Index
-		err := wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
-		if err != nil {
-			panic(err)
-		}
-		log.Infof("ggb: get start to write to db, entry len: %d", wb.Len())
-		err = wb.WriteToDB(d.peerStorage.Engines.Kv)
-		if err != nil {
-			panic(err)
-		}
-		value, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
-		if err != nil {
-			panic(err)
-		}
-		resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Get, Get: &raft_cmdpb.GetResponse{Value: value}}}
-		// 这个wb必须要是作为参数传下来，不然前面的还是指向的错误的地址
-		wb = new(engine_util.WriteBatch)
-	case raft_cmdpb.CmdType_Put:
-		log.Infof("ggb: put response :%v, %v", string(req.Put.Key), string(req.Put.GetValue()))
-		resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Put, Put: new(raft_cmdpb.PutResponse)}}
-	case raft_cmdpb.CmdType_Delete:
-		log.Infof("ggb: delete response")
-		resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Delete, Delete: new(raft_cmdpb.DeleteResponse)}}
-	case raft_cmdpb.CmdType_Snap:
-		d.peer.peerStorage.applyState.AppliedIndex = entry.Index
-		err := wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
-		if err != nil {
-			panic(err)
-		}
-		log.Infof("ggb: snapshot start to write to db, entry len: %d", wb.Len())
-		err = wb.WriteToDB(d.peerStorage.Engines.Kv)
-		if err != nil {
-			panic(err)
-		}
-		log.Infof("ggb: snapshot response")
-		resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Snap, Snap: &raft_cmdpb.SnapResponse{Region: d.Region()}}}
-		p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
-		wb = new(engine_util.WriteBatch)
-	default:
-		panic("wrong cmd type")
-	}
 
 }
 

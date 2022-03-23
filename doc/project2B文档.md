@@ -305,7 +305,11 @@
 + 上一句必须是返回lastIndex+1 而不是lastIndex
 
 ### version "go1.16.3" does not match go tool version "go1.13.8"
-  + 
+  + 重新配置一下Path中的go的路径
+  + which go
+  + cd go的位置
+  + ln -s 新go的执行程序位置 go
+
 ## 结果
 ![](https://gitee.com/agaogao/photobed/raw/master/img/20220322152330.png)
 
@@ -367,9 +371,9 @@
 
 + 日志等级怎么调整？
 + 搜了半天LOG_LEVEL发现无用
-+ 看了代码发现是要设置环境变量为error（比如才有用）
++ 看了代码发现是要设置环境变量为error
 + 如 export LOG_LEVEL=error 无语
-+ 就算是该了代码里面的else都没用 一定要这么搞
++ 就算改了代码里面的这部分都没用 一定要这么搞
 
 ### 天坑4
 
