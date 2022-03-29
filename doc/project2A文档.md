@@ -94,7 +94,8 @@
 
 ### 结果
 
-![](https://gitee.com/agaogao/photobed/raw/master/img/20220224101723.png)
+> gitee图床被封 暂时无了
+all passed
 
 ## 2AB
 
@@ -157,7 +158,8 @@
 
 ### 结果
 
-![](https://gitee.com/agaogao/photobed/raw/master/img/20220307233553.png)
+> gitee图床被封 暂时无了
+all passed
 
 ## 2AC
 
@@ -195,14 +197,14 @@
 + 看了下在只有1日志的时候，说已经stable到2了
 + 有点问题
   + 感觉意思是如果心跳中没有包含所有新的日志就要继续要新日志？
-
-![](https://gitee.com/agaogao/photobed/raw/master/img/20220307233359.png)
+  
 
 ## 2A
 
 ### 结果
 
-![](https://gitee.com/agaogao/photobed/raw/master/img/20220307233512.png)
+> gitee图床被封 暂时无了
+all passed
 
 ## 常见错误
 

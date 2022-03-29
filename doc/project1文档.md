@@ -187,7 +187,8 @@ type Server struct {
 + 按照req要求进行迭代（开始地址，limit等）
 
 ## 结果
-![](https://gitee.com/agaogao/photobed/raw/master/img/20220323095852.png)
+> gitee图床被封 暂时无了
+all passed
 
 ## 想法
 

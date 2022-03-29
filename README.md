@@ -86,7 +86,8 @@ mkdir -p data
 ./tinysql-server --store=tikv --path="127.0.0.1:2379"
 ```
 
-Now you can connect to the database with an official MySQL client:
+Now you can connect to t17:22
+he database with an official MySQL client:
 
 ```bash
 mysql -u root -h 127.0.0.1 -P 4000

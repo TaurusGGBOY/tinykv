@@ -344,7 +344,37 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
-	return nil, nil
+	// delete stale data
+	// 不是所有都需要清空
+	if raft.IsEmptySnap(snapshot) {
+		return &ApplySnapResult{}, nil
+	}
+	if ps.isInitialized() {
+		ps.clearMeta(kvWB, raftWB)
+		ps.clearExtraData(snapData.Region)
+	}
+
+	// 自己写感觉根本就写不全……
+	ps.raftState.LastIndex = snapshot.Metadata.Index
+	ps.raftState.LastTerm = snapshot.Metadata.Term
+	ps.applyState.TruncatedState.Index = ps.raftState.LastIndex
+	ps.applyState.TruncatedState.Term = ps.raftState.LastTerm
+	ps.applyState.AppliedIndex = ps.raftState.LastIndex
+	ps.snapState.StateType = snap.SnapState_Applying
+	kvWB.SetMeta(meta.ApplyStateKey(snapData.Region.GetId()), ps.applyState)
+
+	ch := make(chan bool, 1)
+	ps.regionSched <- &runner.RegionTaskApply{
+		RegionId: snapData.Region.GetId(),
+		Notifier: ch,
+		SnapMeta: snapshot.Metadata,
+		StartKey: snapData.Region.StartKey,
+		EndKey:   snapData.Region.EndKey,
+	}
+	<-ch
+	result := &ApplySnapResult{PrevRegion: ps.region, Region: snapData.Region}
+	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
+	return result, nil
 }
 
 // Save memory states to disk.
@@ -353,27 +383,34 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
 	var err error
-	wb := new(engine_util.WriteBatch)
+	raftWB := new(engine_util.WriteBatch)
+	kvWB := new(engine_util.WriteBatch)
+
+	// 保存快照
+	applySnapResult, err := ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+	if err != nil {
+		panic(err)
+	}
+	ps.Engines.WriteKV(kvWB)
 
 	// 保存entry
-	ps.Append(ready.Entries, wb)
+	ps.Append(ready.Entries, raftWB)
 
 	// 保存hardstate
 	if !raft.IsEmptyHardState(ready.HardState) {
 		ps.raftState.HardState = &ready.HardState
-		err = wb.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
-		if err != nil {
-			panic("SaveReadyState wrong set")
-		}
 	}
-
-	err = ps.Engines.WriteRaft(wb)
+	// 保存raftState
+	err = raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
+	if err != nil {
+		panic("SaveReadyState wrong set")
+	}
+	// 写入wb
+	err = ps.Engines.WriteRaft(raftWB)
 	if err != nil {
 		panic("SaveReadyState wrong append")
 	}
 
-	// TODO 2B
-	applySnapResult := new(ApplySnapResult)
 	return applySnapResult, nil
 }
 

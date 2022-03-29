@@ -14,7 +14,9 @@
 
 package raft
 
-import pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+import (
+	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+)
 
 // RaftLog manage the log entries, its struct look like:
 //
@@ -59,15 +61,15 @@ func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
 	l, _ := storage.FirstIndex()
 	h, _ := storage.LastIndex()
+	//log.Info(fmt.Sprintf("newLog %v %v", l, h))
 	entries, _ := storage.Entries(l, h+1)
-	snapshot, _ := storage.Snapshot()
+	// 不保存snapshot 因为都被执行了
 	return &RaftLog{
-		storage:         storage,
-		applied:         l - 1,
-		stabled:         h,
-		entries:         entries,
-		pendingSnapshot: &snapshot,
-		first:           l,
+		storage: storage,
+		applied: l - 1,
+		stabled: h,
+		entries: entries,
+		first:   l,
 	}
 }
 
@@ -76,6 +78,17 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	first, err := l.storage.FirstIndex()
+	if err != nil {
+		panic(err)
+	}
+	if first > l.first {
+		for len(l.entries) > 0 && first > l.entries[0].GetIndex() {
+			l.entries = l.entries[1:]
+		}
+		//log.Info(fmt.Sprintf("maybe compact %v %v", l.first, first))
+		l.first = first
+	}
 }
 
 // unstableEntries return all the unstable entries
@@ -95,33 +108,42 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	if len(l.entries) > 0 {
-		return l.entries[len(l.entries)-1].GetIndex()
-	}
-	index, _ := l.storage.LastIndex()
-	return index
-}
+	var snapshotIndex uint64
+	storageIndex, _ := l.storage.LastIndex()
 
-func (l *RaftLog) FirstIndex() uint64 {
-	// Your Code Here (2A).
-	if len(l.entries) > 0 {
-		return l.entries[0].GetIndex()
+	if !IsEmptySnap(l.pendingSnapshot) {
+		snapshotIndex = l.pendingSnapshot.GetMetadata().GetIndex()
 	}
-	index, _ := l.storage.LastIndex()
-	return index + 1
+	if len(l.entries) > 0 {
+		return max(snapshotIndex, l.entries[len(l.entries)-1].GetIndex())
+	}
+	return max(storageIndex, snapshotIndex)
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	first, _ := l.storage.FirstIndex()
-	if i < first {
-		return l.storage.Term(i)
+	if i >= l.first {
+		return l.entries[l.getIndex(i)].Term, nil
 	}
-	return l.entries[l.getIndex(i)].Term, nil
+	term, err := l.storage.Term(i)
+	if err == ErrUnavailable && !IsEmptySnap(l.pendingSnapshot) {
+		if i == l.pendingSnapshot.Metadata.Index {
+			term = l.pendingSnapshot.Metadata.Term
+			err = nil
+		} else {
+			err = ErrCompacted
+		}
+	}
+	return term, err
 }
 
 func (l *RaftLog) getIndex(index uint64) uint64 {
+	//firstStorage, _ := l.storage.FirstIndex()
+	//lastStorage, _ := l.storage.LastIndex()
+	//
+	//log.Info(fmt.Sprintf("firstStorage:%v, i:%v l.first:%v, lastIndex:%v, applied:%v", firstStorage, index, l.first, lastStorage, l.applied))
+
 	return index - l.first
 }
 

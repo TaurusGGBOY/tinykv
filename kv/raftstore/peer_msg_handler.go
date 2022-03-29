@@ -145,18 +145,33 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	}
 	// Your Code Here (2B).
 	if msg.GetAdminRequest() != nil {
-		d.handleAdminRequest(msg, cb)
+		d.proposeAdminRequest(msg, cb)
 	} else {
-		d.handleMsgRequest(msg, cb)
+		d.proposeRequest(msg, cb)
 	}
 	log.Debug("Exit proposeRaftCommand")
 }
 
-func (d *peerMsgHandler) handleAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
-	log.Info("Enter handleAdminRequest")
+func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	log.Info("Enter proposeAdminRequest")
+	switch msg.AdminRequest.CmdType {
+	case raft_cmdpb.AdminCmdType_InvalidAdmin:
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		data, err := msg.Marshal()
+		if err != nil {
+			panic(err)
+		}
+		// 不需要回调
+		d.RaftGroup.Propose(data)
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+	case raft_cmdpb.AdminCmdType_Split:
+	default:
+	}
+
 }
 
-func (d *peerMsgHandler) handleMsgRequest(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+func (d *peerMsgHandler) proposeRequest(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	// 迷……为什么知道是用这个函数的
 	data, err := msg.Marshal()
 	if err != nil {
@@ -610,10 +625,16 @@ func (d *peerMsgHandler) process(entry eraftpb.Entry) {
 	if err != nil {
 		panic(err)
 	}
-	if len(msg.Requests) <= 0 {
-		return
+	if len(msg.Requests) > 0 {
+		d.processRequest(entry, msg)
 	}
 
+	if msg.AdminRequest != nil {
+		d.processAdminRequest(entry, msg)
+	}
+}
+
+func (d *peerMsgHandler) processRequest(entry eraftpb.Entry, msg *raft_cmdpb.RaftCmdRequest) {
 	wb := new(engine_util.WriteBatch)
 	defer wb.WriteToDB(d.peerStorage.Engines.Kv)
 
@@ -658,10 +679,10 @@ func (d *peerMsgHandler) process(entry eraftpb.Entry) {
 		}
 		// 返回response
 		p := d.proposals[0]
-		defer func(){
+		defer func() {
 			d.proposals = d.proposals[1:]
 		}()
-		if p.index != entry.Index || p.term != entry.Term{
+		if p.index != entry.Index || p.term != entry.Term {
 			ErrRespStaleCommand(entry.GetTerm())
 			return
 		}
@@ -669,7 +690,7 @@ func (d *peerMsgHandler) process(entry eraftpb.Entry) {
 		resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
 		defer p.cb.Done(resp)
 
-		if p.index!=entry.GetIndex() || p.term != entry.GetTerm() {
+		if p.index != entry.GetIndex() || p.term != entry.GetTerm() {
 			panic("wrong index term ")
 		}
 		switch req.GetCmdType() {
@@ -718,8 +739,31 @@ func (d *peerMsgHandler) process(entry eraftpb.Entry) {
 			panic("wrong cmd type")
 		}
 	}
+}
 
+func (d *peerMsgHandler) processAdminRequest(entry eraftpb.Entry, msg *raft_cmdpb.RaftCmdRequest) {
+	log.Info("Enter processAdminRequest")
+	req := msg.GetAdminRequest()
+	switch msg.AdminRequest.CmdType {
+	case raft_cmdpb.AdminCmdType_InvalidAdmin:
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		logs := req.GetCompactLog()
+		state := d.peerStorage.applyState
+		// TODO为什么是大于等于
+		wb := new(engine_util.WriteBatch)
+		defer wb.WriteToDB(d.peerStorage.Engines.Kv)
 
+		if logs.GetCompactIndex() >= state.GetTruncatedState().GetIndex() {
+			state.TruncatedState.Index = logs.CompactIndex
+			state.TruncatedState.Term = logs.CompactTerm
+			wb.SetMeta(meta.ApplyStateKey(d.regionId), state)
+			d.ScheduleCompactLog(state.TruncatedState.Index)
+		}
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+	case raft_cmdpb.AdminCmdType_Split:
+	default:
+	}
 }
 
 func newAdminRequest(regionID uint64, peer *metapb.Peer) *raft_cmdpb.RaftCmdRequest {

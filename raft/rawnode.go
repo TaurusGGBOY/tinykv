@@ -153,6 +153,12 @@ func (rn *RawNode) Ready() Ready {
 		CommittedEntries: r.RaftLog.entries[r.RaftLog.getIndex(r.RaftLog.applied+1):r.RaftLog.getIndex(r.RaftLog.committed+1)],
 		Messages:         r.msgs,
 	}
+	if !IsEmptySnap(r.RaftLog.pendingSnapshot) {
+		ready.Snapshot = *r.RaftLog.pendingSnapshot
+		// ggb:这一句太奇怪了吧……一定要加这个
+		//ready.Snapshot.Metadata = nil
+		r.RaftLog.pendingSnapshot = nil
+	}
 	soft := &SoftState{Lead: r.Lead, RaftState: r.State}
 	hard := pb.HardState{Term: r.Term, Vote: r.Vote, Commit: r.RaftLog.committed}
 	if !soft.equals(rn.CurrentReady.SoftState) {
@@ -180,22 +186,28 @@ func (rn *RawNode) HasReady() bool {
 	soft := &SoftState{Lead: r.Lead, RaftState: r.State}
 	hard := pb.HardState{Term: r.Term, Vote: r.Vote, Commit: r.RaftLog.committed}
 	return len(r.RaftLog.unstableEntries()) > 0 || len(r.RaftLog.entries[r.RaftLog.getIndex(r.RaftLog.applied+1):r.RaftLog.getIndex(r.RaftLog.committed+1)]) > 0 || len(r.msgs) > 0 ||
-		!soft.equals(rn.CurrentReady.SoftState) || (!isHardStateEqual(hard, rn.CurrentReady.HardState) && !IsEmptyHardState(hard))
+		!soft.equals(rn.CurrentReady.SoftState) || (!isHardStateEqual(hard, rn.CurrentReady.HardState) && !IsEmptyHardState(hard)) ||
+		!IsEmptySnap(r.RaftLog.pendingSnapshot)
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
-	rn.Raft.RaftLog.stabled = (uint64)(len(rd.Entries)) + rn.Raft.RaftLog.stabled
-
-	rn.Raft.RaftLog.applied = rn.Raft.RaftLog.applied + (uint64)(len(rd.CommittedEntries))
+	if len(rd.Entries) > 0 {
+		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].Index
+	}
+	if len(rd.CommittedEntries) > 0 {
+		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
+	}
 	if rd.SoftState != nil {
 		rn.CurrentReady.SoftState = rd.SoftState
 	}
 	if !IsEmptyHardState(rd.HardState) {
 		rn.CurrentReady.HardState = rd.HardState
 	}
+	// 可能需要压缩
+	rn.Raft.RaftLog.maybeCompact()
 }
 
 // GetProgress return the Progress of this node and its peers, if this

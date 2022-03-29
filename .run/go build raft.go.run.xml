@@ -1,0 +1,11 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="go build raft.go" type="GoApplicationRunConfiguration" factoryName="Go Application" singleton="false" nameIsGenerated="true">
+    <module name="tinykv" />
+    <target name="ggb@192.168.254.132:22" />
+    <working_directory value="$PROJECT_DIR$" />
+    <kind value="FILE" />
+    <directory value="$PROJECT_DIR$" />
+    <filePath value="$PROJECT_DIR$/raft/raft.go" />
+    <method v="2" />
+  </configuration>
+</component>

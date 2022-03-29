@@ -207,7 +207,15 @@ func (r *Raft) sendAppend(to uint64) bool {
 		Commit:  r.RaftLog.committed,
 	}
 	msg.Index = r.Prs[to].Next - 1
-	msg.LogTerm, _ = r.RaftLog.Term(msg.Index)
+	var err error
+	msg.LogTerm, err = r.RaftLog.Term(msg.Index)
+	if err != nil {
+		// 如果
+		if err == ErrCompacted {
+			r.sendSnapshot(to)
+			return false
+		}
+	}
 
 	for i := r.Prs[to].Next; i <= r.RaftLog.LastIndex(); i++ {
 		msg.Entries = append(msg.Entries, r.RaftLog.getByIndex(i))
@@ -378,6 +386,12 @@ func (r *Raft) becomeLeader() {
 	r.resetState()
 	r.State = StateLeader
 	r.Lead = r.id
+	lastIndex := r.RaftLog.LastIndex()
+	for i := range r.Prs {
+		r.Prs[i].Next = lastIndex + 1
+	}
+	r.Prs[r.id].Next = lastIndex + 1
+	r.Prs[r.id].Match = lastIndex
 	msg1 := pb.Message{
 		From:    r.id,
 		To:      r.id,
@@ -401,6 +415,7 @@ func (r *Raft) Step(m pb.Message) error {
 	case StateLeader:
 		return r.leaderHandler(m)
 	}
+
 	return nil
 }
 
@@ -414,6 +429,8 @@ func (r *Raft) followerHandler(m pb.Message) error {
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	default:
 		break
 	}
@@ -433,6 +450,8 @@ func (r *Raft) candidateHandler(m pb.Message) error {
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgPropose:
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	default:
 		break
 	}
@@ -456,6 +475,8 @@ func (r *Raft) leaderHandler(m pb.Message) error {
 		r.handlePropose(m)
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.handHeartbeatResponse(m)
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	default:
 		break
 	}
@@ -475,11 +496,17 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	}
 
 	if m.GetIndex() > r.RaftLog.LastIndex() {
-		r.sendAppendResponse(m.GetFrom(), r.RaftLog.LastIndex() + 1, None, true)
+		r.sendAppendResponse(m.GetFrom(), r.RaftLog.LastIndex()+1, None, true)
 		return
 	}
 
-	if term, _ := r.RaftLog.Term(m.GetIndex()); m.GetIndex() >= r.RaftLog.FirstIndex() && term != m.GetLogTerm() {
+	if m.GetIndex() > 1844674407370955160 || m.GetIndex() < 0 {
+		panic("m.index过大")
+	}
+	if term, err := r.RaftLog.Term(m.GetIndex()); m.GetIndex() >= r.RaftLog.first && term != m.GetLogTerm() {
+		if err != nil {
+			panic(err)
+		}
 		index := sort.Search(int(r.RaftLog.getIndex(m.GetIndex()+1)), func(i int) bool {
 			return r.RaftLog.entries[i].Term == term
 		})
@@ -597,6 +624,38 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	if m.GetTerm() < r.Term {
+		r.sendAppendResponse(m.GetFrom(), None, None, true)
+		return
+	}
+
+	if m.GetTerm() >= r.Term {
+		r.becomeFollower(m.GetTerm(), m.GetFrom())
+	}
+
+	meta := m.GetSnapshot().GetMetadata()
+	if meta.GetIndex() < r.RaftLog.committed {
+		r.sendAppendResponse(m.GetFrom(), r.RaftLog.committed, None, true)
+		return
+	}
+	// 更新entries first applied commited stabled Next pendingsnapshot
+	// TODO 为什么是抛掉所有的 不能是截断
+	if len(r.RaftLog.entries) > 0 {
+		r.RaftLog.entries = make([]pb.Entry, 0)
+	}
+	r.RaftLog.first = meta.GetIndex() + 1
+	r.RaftLog.applied = meta.GetIndex()
+	r.RaftLog.committed = meta.GetIndex()
+	r.RaftLog.stabled = meta.GetIndex()
+
+	r.Prs = make(map[uint64]*Progress)
+	for _, i := range meta.ConfState.Nodes {
+		r.Prs[i] = new(Progress)
+	}
+	if !IsEmptySnap(m.GetSnapshot()) {
+		r.RaftLog.pendingSnapshot = m.GetSnapshot()
+	}
+	r.sendAppendResponse(m.GetFrom(), r.RaftLog.LastIndex(), None, true)
 }
 
 func (r *Raft) handleRequestVote(m pb.Message) {
@@ -690,4 +749,20 @@ func (r *Raft) resetState() {
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
 	r.randomElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
+}
+
+func (r *Raft) sendSnapshot(to uint64) {
+	snapshot, err := r.RaftLog.storage.Snapshot()
+	if err != nil {
+		return
+	}
+	msg := pb.Message{
+		MsgType:  pb.MessageType_MsgSnapshot,
+		Term:     r.Term,
+		From:     r.id,
+		To:       to,
+		Commit:   r.RaftLog.committed,
+		Snapshot: &snapshot,
+	}
+	r.msgs = append(r.msgs, msg)
 }
