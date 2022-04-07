@@ -187,9 +187,12 @@ func newRaft(c *Config) *Raft {
 	lastIndex := r.RaftLog.LastIndex()
 	log.Infof("ggb: restart lastindex %v", lastIndex)
 	for _, i := range c.peers {
-		r.Prs[i] = &Progress{Match: 0, Next: lastIndex + 1}
+		if i == r.id {
+			r.Prs[r.id] = &Progress{Match: lastIndex, Next: lastIndex + 1}
+		} else {
+			r.Prs[i] = &Progress{Match: 0, Next: lastIndex + 1}
+		}
 	}
-	r.Prs[r.id] = &Progress{Match: lastIndex, Next: lastIndex + 1}
 
 	r.resetState()
 	return &r
@@ -355,6 +358,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.Term = term
 	r.State = StateFollower
 	r.Vote = None
+	r.leadTransferee = 0
 }
 
 // becomeCandidate transform this peer's state to candidate
@@ -407,6 +411,9 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+	if r.Prs[r.id] == nil && m.MsgType == pb.MessageType_MsgTimeoutNow {
+		return nil
+	}
 	switch r.State {
 	case StateFollower:
 		return r.followerHandler(m)
@@ -431,6 +438,10 @@ func (r *Raft) followerHandler(m pb.Message) error {
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
+	case pb.MessageType_MsgTimeoutNow:
+		r.handleTimeoutNow(m)
+	case pb.MessageType_MsgTransferLeader:
+		r.startElection()
 	default:
 		break
 	}
@@ -452,6 +463,10 @@ func (r *Raft) candidateHandler(m pb.Message) error {
 	case pb.MessageType_MsgPropose:
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
+	case pb.MessageType_MsgTimeoutNow:
+		r.handleTimeoutNow(m)
+	case pb.MessageType_MsgTransferLeader:
+		r.startElection()
 	default:
 		break
 	}
@@ -477,6 +492,10 @@ func (r *Raft) leaderHandler(m pb.Message) error {
 		r.handHeartbeatResponse(m)
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
+	case pb.MessageType_MsgTransferLeader:
+		r.handleTransferLeader(m)
+	case pb.MessageType_MsgTimeoutNow:
+		r.handleTimeoutNow(m)
 	default:
 		break
 	}
@@ -578,6 +597,9 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		r.Prs[m.GetFrom()].Match = m.GetIndex()
 		r.Prs[m.GetFrom()].Next = r.Prs[m.GetFrom()].Match + 1
 		r.PushUpCommit()
+	}
+	if m.From == r.leadTransferee && r.Prs[m.GetFrom()].Match >= r.RaftLog.committed {
+		r.timeoutNow(m.From)
 	}
 }
 
@@ -724,9 +746,18 @@ func (r *Raft) handleResponseVote(m pb.Message) {
 }
 
 func (r *Raft) handlePropose(m pb.Message) {
+	if r.leadTransferee != 0 {
+		return
+	}
 	for _, entry := range m.Entries {
 		entry.Term = r.Term
 		entry.Index = r.RaftLog.LastIndex() + 1
+		if entry.EntryType == pb.EntryType_EntryConfChange {
+			if r.PendingConfIndex != None {
+				continue
+			}
+			r.PendingConfIndex = entry.Index
+		}
 		r.RaftLog.entries = append(r.RaftLog.entries, *entry)
 	}
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
@@ -738,11 +769,18 @@ func (r *Raft) handlePropose(m pb.Message) {
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	if r.Prs[id] == nil {
+		r.Prs[id] = &Progress{Match: 0, Next: r.RaftLog.LastIndex() + 1}
+	}
+	r.PendingConfIndex = None
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	delete(r.Prs, id)
+	r.PushUpCommit()
+	r.PendingConfIndex = None
 }
 
 func (r *Raft) resetState() {
@@ -765,4 +803,40 @@ func (r *Raft) sendSnapshot(to uint64) {
 		Snapshot: &snapshot,
 	}
 	r.msgs = append(r.msgs, msg)
+}
+
+func (r *Raft) handleTransferLeader(m pb.Message) {
+	if m.From == r.id || r.Prs[m.From] == nil {
+		return
+	}
+	r.leadTransferee = m.From
+	if r.checkIfUpToDate(m.From) {
+		r.timeoutNow(m.From)
+	} else {
+		r.sendAppend(m.From)
+	}
+}
+
+func (r *Raft) timeoutNow(i uint64) {
+	if r.Prs[i] == nil {
+		return
+	}
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgTimeoutNow,
+		Term:    r.Term,
+		From:    r.id,
+		To:      i,
+	}
+	r.msgs = append(r.msgs, msg)
+}
+
+func (r *Raft) checkIfUpToDate(i uint64) bool {
+	if r.Prs[i].Match == r.RaftLog.committed {
+		return true
+	}
+	return false
+}
+
+func (r *Raft) handleTimeoutNow(m pb.Message) {
+	r.startElection()
 }
