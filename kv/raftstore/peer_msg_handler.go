@@ -5,6 +5,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -45,13 +46,23 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped || !d.RaftGroup.HasReady() {
 		return
 	}
-	log.Debug("Entry HandleRaftReady")
+	log.Infof("%v Entry HandleRaftReady", d.Tag)
 	// Your Code Here (2B).
 	rd := d.RaftGroup.Ready()
 	// 最后执行advance
 	defer d.RaftGroup.Advance(rd)
 
-	d.peerStorage.SaveReadyState(&rd)
+	result, _ := d.peerStorage.SaveReadyState(&rd)
+	// TODO 这一段还要看看
+	if result != nil && !reflect.DeepEqual(result.PrevRegion, result.Region) {
+		d.peerStorage.SetRegion(result.Region)
+		storeMeta := d.ctx.storeMeta
+		storeMeta.Lock()
+		storeMeta.regions[result.Region.Id] = result.Region
+		storeMeta.regionRanges.Delete(&regionItem{region: result.PrevRegion})
+		storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: result.Region})
+		storeMeta.Unlock()
+	}
 
 	// 读取消息队列
 	//log.Infof("ggb: send all msg len %v", len(rd.Messages))
@@ -64,6 +75,9 @@ func (d *peerMsgHandler) HandleRaftReady() {
 
 	for _, entry := range rd.CommittedEntries {
 		d.process(entry)
+		if d.stopped {
+			return
+		}
 	}
 	wb := new(engine_util.WriteBatch)
 	d.peer.peerStorage.applyState.AppliedIndex = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
@@ -153,10 +167,9 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 }
 
 func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
-	log.Info("Enter proposeAdminRequest")
+	//log.Info("Enter proposeAdminRequest")
 	switch msg.AdminRequest.CmdType {
 	case raft_cmdpb.AdminCmdType_InvalidAdmin:
-	case raft_cmdpb.AdminCmdType_ChangePeer:
 	case raft_cmdpb.AdminCmdType_CompactLog:
 		data, err := msg.Marshal()
 		if err != nil {
@@ -165,6 +178,25 @@ func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb 
 		// 不需要回调
 		d.RaftGroup.Propose(data)
 	case raft_cmdpb.AdminCmdType_TransferLeader:
+		d.RaftGroup.TransferLeader(msg.AdminRequest.TransferLeader.Peer.Id)
+		resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
+		resp.AdminResponse = &raft_cmdpb.AdminResponse{CmdType: raft_cmdpb.AdminCmdType_TransferLeader, TransferLeader: new(raft_cmdpb.TransferLeaderResponse)}
+		cb.Done(resp)
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+		// 如果有pending的 先要拒绝
+		if d.RaftGroup.Raft.PendingConfIndex > d.peerStorage.AppliedIndex() {
+			return
+		}
+		// 如果自己是leader peer只有两个，就丢弃propose
+		if (msg.AdminRequest.ChangePeer.ChangeType == eraftpb.ConfChangeType_RemoveNode) && d.IsLeader() && len(d.peerCache) == 2 && msg.AdminRequest.ChangePeer.Peer.Id == d.PeerId() {
+			return
+		}
+		// 如果
+		context, _ := msg.Marshal()
+		cc := eraftpb.ConfChange{ChangeType: msg.AdminRequest.ChangePeer.ChangeType, NodeId: msg.AdminRequest.ChangePeer.Peer.Id, Context: context}
+		p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
+		d.proposals = append(d.proposals, p)
+		d.RaftGroup.ProposeConfChange(cc)
 	case raft_cmdpb.AdminCmdType_Split:
 	default:
 	}
@@ -514,7 +546,7 @@ func (d *peerMsgHandler) onSplitRegionCheckTick() {
 	if !d.IsLeader() {
 		return
 	}
-	if d.ApproximateSize != nil && d.SizeDiffHint < d.ctx.cfg.RegionSplitSize/8 {
+	if d.ApproximateSize != nil && d.SizeDiffHint < d.ctx.cfg.RegionSplitSize {
 		return
 	}
 	d.ctx.splitCheckTaskSender <- &runner.SplitCheckTask{
@@ -620,6 +652,11 @@ func (d *peerMsgHandler) onGCSnap(snaps []snap.SnapKeyWithSending) {
 // commited的日志就要apply到状态机中
 // 但是是不是apply到状态机中就行？不用管applyIndex吗？
 func (d *peerMsgHandler) process(entry eraftpb.Entry) {
+	// 因为marshal之后不是raftcmdrequest
+	if entry.EntryType == eraftpb.EntryType_EntryConfChange {
+		d.processConfChange(entry)
+		return
+	}
 	msg := &raft_cmdpb.RaftCmdRequest{}
 	err := msg.Unmarshal(entry.Data)
 	if err != nil {
@@ -690,9 +727,6 @@ func (d *peerMsgHandler) processRequest(entry eraftpb.Entry, msg *raft_cmdpb.Raf
 		resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
 		defer p.cb.Done(resp)
 
-		if p.index != entry.GetIndex() || p.term != entry.GetTerm() {
-			panic("wrong index term ")
-		}
 		switch req.GetCmdType() {
 		case raft_cmdpb.CmdType_Invalid:
 		case raft_cmdpb.CmdType_Get:
@@ -746,7 +780,6 @@ func (d *peerMsgHandler) processAdminRequest(entry eraftpb.Entry, msg *raft_cmdp
 	req := msg.GetAdminRequest()
 	switch msg.AdminRequest.CmdType {
 	case raft_cmdpb.AdminCmdType_InvalidAdmin:
-	case raft_cmdpb.AdminCmdType_ChangePeer:
 	case raft_cmdpb.AdminCmdType_CompactLog:
 		logs := req.GetCompactLog()
 		state := d.peerStorage.applyState
@@ -760,9 +793,100 @@ func (d *peerMsgHandler) processAdminRequest(entry eraftpb.Entry, msg *raft_cmdp
 			wb.SetMeta(meta.ApplyStateKey(d.regionId), state)
 			d.ScheduleCompactLog(state.TruncatedState.Index)
 		}
+	case raft_cmdpb.AdminCmdType_ChangePeer:
 	case raft_cmdpb.AdminCmdType_TransferLeader:
 	case raft_cmdpb.AdminCmdType_Split:
 	default:
+	}
+}
+
+func (d *peerMsgHandler) processConfChange(entry eraftpb.Entry) {
+	log.Infof("ggb: (%v %v) Enter processConfChange", d.storeID(), d.PeerId())
+	cc := new(eraftpb.ConfChange)
+	cc.Unmarshal(entry.Data)
+
+	msg := &raft_cmdpb.RaftCmdRequest{}
+	msg.Unmarshal(cc.Context)
+
+	region := d.Region()
+
+	wb := new(engine_util.WriteBatch)
+	defer wb.WriteToDB(d.peerStorage.Engines.Kv)
+
+	switch cc.ChangeType {
+	case eraftpb.ConfChangeType_AddNode:
+		n := 0
+		for i, peer := range region.Peers {
+			if peer.Id == cc.NodeId {
+				n = i
+				break
+			}
+			n++
+		}
+		if n == len(region.Peers) {
+			peer := msg.AdminRequest.ChangePeer.Peer
+			region.Peers = append(region.Peers, peer)
+			region.RegionEpoch.ConfVer++
+			meta.WriteRegionState(wb, region, rspb.PeerState_Normal)
+			storeMeta := d.ctx.storeMeta
+			storeMeta.Lock()
+			storeMeta.regions[region.Id] = region
+			storeMeta.Unlock()
+			d.insertPeerCache(peer)
+		}
+	case eraftpb.ConfChangeType_RemoveNode:
+		// 必须添加这个判断本机如果就是这个node的情况
+		if cc.NodeId == d.Meta.Id {
+			d.destroyPeer()
+			break
+		}
+		for i, peer := range region.Peers {
+			if peer.Id == cc.NodeId {
+				region.Peers = append(region.Peers[:i], region.Peers[i+1:]...)
+				region.RegionEpoch.ConfVer++
+				meta.WriteRegionState(wb, region, rspb.PeerState_Normal)
+				storeMeta := d.ctx.storeMeta
+				storeMeta.Lock()
+				storeMeta.regions[region.Id] = region
+				storeMeta.Unlock()
+				d.removePeerCache(cc.NodeId)
+				break
+			}
+		}
+	default:
+	}
+	d.RaftGroup.ApplyConfChange(*cc)
+	// TODO 没有提取出来
+	// 删除不合法proposal
+	i := 0
+	for _, p := range d.proposals {
+		if p.index >= entry.GetIndex() {
+			break
+		}
+		ErrRespStaleCommand(entry.GetTerm())
+		i++
+	}
+	d.proposals = d.proposals[i:]
+
+	if len(d.proposals) <= 0 {
+		log.Infof("ggb: (%v, %v) conf proposal len == 0", d.storeID(), d.PeerId())
+		return
+	}
+	// 返回response
+	p := d.proposals[0]
+	d.proposals = d.proposals[1:]
+
+	if p.index != entry.Index || p.term != entry.Term {
+		ErrRespStaleCommand(entry.GetTerm())
+		return
+	}
+	// 设置回复
+	resp := &raft_cmdpb.RaftCmdResponse{Header: new(raft_cmdpb.RaftResponseHeader),
+		AdminResponse: &raft_cmdpb.AdminResponse{CmdType: raft_cmdpb.AdminCmdType_ChangePeer, ChangePeer: new(raft_cmdpb.ChangePeerResponse)}}
+	p.cb.Done(resp)
+	// 刷新调度器里面的缓存
+	if d.IsLeader() {
+		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
 	}
 }
 

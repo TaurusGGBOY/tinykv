@@ -249,7 +249,6 @@ func (r *Raft) sendHeartbeat(to uint64) {
 		To:      to,
 		From:    r.id,
 		Term:    r.Term,
-		Commit:  r.RaftLog.committed,
 	}
 	r.msgs = append(r.msgs, msg)
 }
@@ -262,6 +261,7 @@ func (r *Raft) sendHeartbeatResponse(to uint64, reject bool) {
 		From:    r.id,
 		To:      to,
 		Reject:  reject,
+		Commit:  r.RaftLog.committed,
 	}
 	r.msgs = append(r.msgs, msg)
 }
@@ -277,7 +277,6 @@ func (r *Raft) sendAllHeartbeat() {
 }
 
 func (r *Raft) sendAllAppendEntries() {
-	r.resetState()
 	for id, _ := range r.Prs {
 		if id == r.id {
 			continue
@@ -489,7 +488,7 @@ func (r *Raft) leaderHandler(m pb.Message) error {
 	case pb.MessageType_MsgPropose:
 		r.handlePropose(m)
 	case pb.MessageType_MsgHeartbeatResponse:
-		r.handHeartbeatResponse(m)
+		r.handleHeartbeatResponse(m)
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
 	case pb.MessageType_MsgTransferLeader:
@@ -556,7 +555,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	r.sendAppendResponse(m.GetFrom(), r.RaftLog.LastIndex(), None, false)
 }
 
-func (r *Raft) handHeartbeatResponse(m pb.Message) {
+func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 	if r.Term > m.GetTerm() {
 		return
 	}
@@ -564,7 +563,7 @@ func (r *Raft) handHeartbeatResponse(m pb.Message) {
 		r.becomeFollower(m.GetTerm(), None)
 		return
 	}
-	if !m.Reject {
+	if m.Reject || m.Commit < r.RaftLog.committed {
 		r.sendAppend(m.GetFrom())
 	}
 }
@@ -637,9 +636,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	if r.Term <= m.GetTerm() {
 		r.becomeFollower(m.GetTerm(), m.GetFrom())
 	}
-	if r.RaftLog.LastIndex() < m.GetCommit() {
-		r.sendHeartbeatResponse(m.GetFrom(), false)
-	}
+	r.sendHeartbeatResponse(m.GetFrom(), false)
 	r.resetState()
 }
 
@@ -753,7 +750,7 @@ func (r *Raft) handlePropose(m pb.Message) {
 		entry.Term = r.Term
 		entry.Index = r.RaftLog.LastIndex() + 1
 		if entry.EntryType == pb.EntryType_EntryConfChange {
-			if r.PendingConfIndex != None {
+			if r.PendingConfIndex > r.RaftLog.applied {
 				continue
 			}
 			r.PendingConfIndex = entry.Index
