@@ -351,7 +351,7 @@ func (r *Raft) tickHeartbeat() {
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).\
-	//log.Infof("%v become follower!", r.id)
+	log.Infof("%v become follower!", r.id)
 	r.resetState()
 	r.Lead = lead
 	r.Term = term
@@ -363,7 +363,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
-	//log.Infof("%v become candidate!", r.id)
+	log.Infof("%v become candidate!", r.id)
 	r.resetState()
 	r.Term++
 	r.State = StateCandidate
@@ -766,6 +766,7 @@ func (r *Raft) handlePropose(m pb.Message) {
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	log.Infof("ggb: %v add ggbnode %v when commit %v applied %d is leader: %v", r.id, id, r.RaftLog.committed, r.RaftLog.applied, r.State)
 	if r.Prs[id] == nil {
 		r.Prs[id] = &Progress{Match: 0, Next: r.RaftLog.LastIndex() + 1}
 	}
@@ -775,6 +776,7 @@ func (r *Raft) addNode(id uint64) {
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	log.Infof("ggb: %remove gbnode %v when commit %v applied %d is leader: %v", r.id, id, r.RaftLog.committed, r.RaftLog.applied, r.State)
 	delete(r.Prs, id)
 	r.PushUpCommit()
 	r.PendingConfIndex = None

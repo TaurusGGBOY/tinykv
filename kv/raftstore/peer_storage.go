@@ -361,7 +361,9 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	ps.applyState.TruncatedState.Term = ps.raftState.LastTerm
 	ps.applyState.AppliedIndex = ps.raftState.LastIndex
 	ps.snapState.StateType = snap.SnapState_Applying
+	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
 	kvWB.SetMeta(meta.ApplyStateKey(snapData.Region.GetId()), ps.applyState)
+	raftWB.SetMeta(meta.RaftStateKey(snapData.Region.GetId()), ps.raftState)
 
 	ch := make(chan bool, 1)
 	ps.regionSched <- &runner.RegionTaskApply{
@@ -373,7 +375,6 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	}
 	<-ch
 	result := &ApplySnapResult{PrevRegion: ps.region, Region: snapData.Region}
-	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
 	return result, nil
 }
 
@@ -392,6 +393,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		panic(err)
 	}
 	ps.Engines.WriteKV(kvWB)
+	ps.Engines.WriteRaft(raftWB)
 
 	// 保存entry
 	ps.Append(ready.Entries, raftWB)

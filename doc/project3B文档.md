@@ -113,14 +113,30 @@ bug4:panic: [region 1] 2 meta corruption detected
   + meta.regionRanges.Delete(&regionItem{region: d.Region()}) == nil
   + 原因：貌似是没有setregion 
   + 解决：hasRaftReady处修改region和regionRanges
+
 ### TestConfChangeRecover3B
 
 + bug1: panic: runtime error: slice bounds out of range [1:0]
-+ 
-### TestConfChangeRecoverManyClients3B
-
-+ bug1:panic: unmatched conf version
-  + 
++ bug2:panic: unmatched conf version
++ 很奇怪，追踪了confVer的变化，有的时候从5变到7，但是后面的又从5开始
++ 简单来说就是regionsRange这个b加树里存的confVer 和 传过来的region的confVer不一样
++ search的region 是 在confver++的时候直接更新进去的
++ 传过来的region 调用链为 handleHeartbeatConfVersion<-RegionHeartbeat<-onHeartbeat<-SchedulerTaskHandler Handle<-worker Start
++ peer有个 HeartbeatScheduler 里面会clone当前的region 发送请求给 调度器worker
++ 两个时刻会触发 一个是leader并且 onSchedulerHeartbeatTick 一个是AnyNewPeerCatchUp
++ 跟踪一下confVer变化
+  + 5 leader heartbeat 5
+  + 4 follower confver 5->6
+  + 4 follower confver 6->7
+  + 1 follower 5->6
+  + 1 follower 6->7
+  + 5 follower 5->6
+  + 5 follower 6->7
+  + 1 成为leader heartbeat变为7
++ 问题是这样的的
+  + 看日志 leader的applied从1329 退到了 630？
++ 又给ctx加了lock 有点效果 但是总体很迷
++ TODO 很迷 最后还是没能完全解决 有概率会出现
 
 ## 可能用到和修改的地方
 
@@ -137,8 +153,21 @@ bug4:panic: [region 1] 2 meta corruption detected
 + clear peerstorage数据
 + 给每个请求发送注意peer被删了
 
-+ 
+### processConfChange
 
++ 添加结点
+  + 如果已经存在peerStorage的region里面了，就break
+  + 否则 confver++
+  + 往region的peers里面加peer结点
+  + 往kv batch里面写regionstate信息
+  + insertPeerCache
++ 删除结点
+  + 如果当前=删除结点 自毁 break
+  + 如果当前节点不存在在region break
+  + 否则confver++
+  + 删除peers里面的该结点
+  + 往kv batch里面写regionstate信息
+  + removePeerCache
 
 ## 问题
 
@@ -156,8 +185,6 @@ bug4:panic: [region 1] 2 meta corruption detected
 ## TODO
 
 + confChange没有debug出来
-+ 
-
 
 ## 参考
 

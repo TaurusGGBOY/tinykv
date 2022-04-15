@@ -700,15 +700,7 @@ func (d *peerMsgHandler) processRequest(entry eraftpb.Entry, msg *raft_cmdpb.Raf
 		}
 
 		// 删除不合法proposal
-		i := 0
-		for _, p := range d.proposals {
-			if p.index >= entry.GetIndex() {
-				break
-			}
-			ErrRespStaleCommand(entry.GetTerm())
-			i++
-		}
-		d.proposals = d.proposals[i:]
+		d.removeInvalidProposal(entry)
 
 		if len(d.proposals) <= 0 {
 			log.Info("ggb: proposal len == 0")
@@ -716,9 +708,7 @@ func (d *peerMsgHandler) processRequest(entry eraftpb.Entry, msg *raft_cmdpb.Raf
 		}
 		// 返回response
 		p := d.proposals[0]
-		defer func() {
-			d.proposals = d.proposals[1:]
-		}()
+		d.proposals = d.proposals[1:]
 		if p.index != entry.Index || p.term != entry.Term {
 			ErrRespStaleCommand(entry.GetTerm())
 			return
@@ -808,56 +798,87 @@ func (d *peerMsgHandler) processConfChange(entry eraftpb.Entry) {
 	msg := &raft_cmdpb.RaftCmdRequest{}
 	msg.Unmarshal(cc.Context)
 
-	region := d.Region()
-
 	wb := new(engine_util.WriteBatch)
 	defer wb.WriteToDB(d.peerStorage.Engines.Kv)
 
 	switch cc.ChangeType {
 	case eraftpb.ConfChangeType_AddNode:
-		n := 0
-		for i, peer := range region.Peers {
-			if peer.Id == cc.NodeId {
-				n = i
-				break
-			}
-			n++
+		//println(d.PeerId(), "cc.NodeId:", cc.NodeId)
+		if isPeerExists(d.Region(), cc.NodeId) {
+			break
 		}
-		if n == len(region.Peers) {
-			peer := msg.AdminRequest.ChangePeer.Peer
-			region.Peers = append(region.Peers, peer)
-			region.RegionEpoch.ConfVer++
-			meta.WriteRegionState(wb, region, rspb.PeerState_Normal)
-			storeMeta := d.ctx.storeMeta
-			storeMeta.Lock()
-			storeMeta.regions[region.Id] = region
-			storeMeta.Unlock()
-			d.insertPeerCache(peer)
+		log.Infof("ggb: (%v %v) Enter processConfChange add node confVer:%v", d.storeID(), d.PeerId(), d.Region().RegionEpoch.ConfVer)
+		d.ctx.storeMeta.Lock()
+		d.Region().RegionEpoch.ConfVer++
+		peer := &metapb.Peer{
+			Id:      cc.NodeId,
+			StoreId: msg.AdminRequest.ChangePeer.Peer.StoreId,
 		}
+		d.Region().Peers = append(d.Region().Peers, peer)
+		meta.WriteRegionState(wb, d.Region(), rspb.PeerState_Normal)
+		d.insertPeerCache(peer)
+		d.ctx.storeMeta.Unlock()
 	case eraftpb.ConfChangeType_RemoveNode:
-		// 必须添加这个判断本机如果就是这个node的情况
-		if cc.NodeId == d.Meta.Id {
+		// destroy itself
+		if cc.NodeId == d.PeerId() {
 			d.destroyPeer()
 			break
 		}
-		for i, peer := range region.Peers {
-			if peer.Id == cc.NodeId {
-				region.Peers = append(region.Peers[:i], region.Peers[i+1:]...)
-				region.RegionEpoch.ConfVer++
-				meta.WriteRegionState(wb, region, rspb.PeerState_Normal)
-				storeMeta := d.ctx.storeMeta
-				storeMeta.Lock()
-				storeMeta.regions[region.Id] = region
-				storeMeta.Unlock()
-				d.removePeerCache(cc.NodeId)
+		// if not itself, delete it from region
+		if !isPeerExists(d.Region(), cc.NodeId) {
+			break
+		}
+		//  ignore the duplicate commands of the same conf change
+		log.Infof("ggb: (%v %v) Enter processConfChange remove node confVer:%v", d.storeID(), d.PeerId(), d.Region().RegionEpoch.ConfVer)
+		d.ctx.storeMeta.Lock()
+		d.Region().RegionEpoch.ConfVer++
+		for i, p := range d.Region().Peers {
+			if p.Id == cc.NodeId {
+				d.Region().Peers = append(d.Region().Peers[:i], d.Region().Peers[i+1:]...)
 				break
 			}
 		}
+		meta.WriteRegionState(wb, d.Region(), rspb.PeerState_Normal)
+		d.removePeerCache(cc.NodeId)
+		d.ctx.storeMeta.Unlock()
 	default:
 	}
+
 	d.RaftGroup.ApplyConfChange(*cc)
-	// TODO 没有提取出来
+
+	// 刷新调度器里面的缓存
+	// 告知心跳worker 这里已经更新好了
+	if d.IsLeader() {
+		defer d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
+	}
+
 	// 删除不合法proposal
+	d.removeInvalidProposal(entry)
+
+	if len(d.proposals) <= 0 {
+		log.Infof("ggb: (%v, %v) conf proposal len == 0", d.storeID(), d.PeerId())
+		return
+	}
+
+	// 返回response
+	p := d.proposals[0]
+	d.proposals = d.proposals[1:]
+
+	if p.index != entry.Index || p.term != entry.Term {
+		ErrRespStaleCommand(entry.GetTerm())
+		return
+	}
+
+	// 设置回复
+	p.cb.Done(&raft_cmdpb.RaftCmdResponse{
+		Header: new(raft_cmdpb.RaftResponseHeader),
+		AdminResponse: &raft_cmdpb.AdminResponse{
+			CmdType:    raft_cmdpb.AdminCmdType_ChangePeer,
+			ChangePeer: new(raft_cmdpb.ChangePeerResponse)}})
+
+}
+
+func (d *peerMsgHandler) removeInvalidProposal(entry eraftpb.Entry) {
 	i := 0
 	for _, p := range d.proposals {
 		if p.index >= entry.GetIndex() {
@@ -867,27 +888,15 @@ func (d *peerMsgHandler) processConfChange(entry eraftpb.Entry) {
 		i++
 	}
 	d.proposals = d.proposals[i:]
+}
 
-	if len(d.proposals) <= 0 {
-		log.Infof("ggb: (%v, %v) conf proposal len == 0", d.storeID(), d.PeerId())
-		return
+func isPeerExists(region *metapb.Region, id uint64) bool {
+	for _, p := range region.Peers {
+		if p.Id == id {
+			return true
+		}
 	}
-	// 返回response
-	p := d.proposals[0]
-	d.proposals = d.proposals[1:]
-
-	if p.index != entry.Index || p.term != entry.Term {
-		ErrRespStaleCommand(entry.GetTerm())
-		return
-	}
-	// 设置回复
-	resp := &raft_cmdpb.RaftCmdResponse{Header: new(raft_cmdpb.RaftResponseHeader),
-		AdminResponse: &raft_cmdpb.AdminResponse{CmdType: raft_cmdpb.AdminCmdType_ChangePeer, ChangePeer: new(raft_cmdpb.ChangePeerResponse)}}
-	p.cb.Done(resp)
-	// 刷新调度器里面的缓存
-	if d.IsLeader() {
-		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
-	}
+	return false
 }
 
 func newAdminRequest(regionID uint64, peer *metapb.Peer) *raft_cmdpb.RaftCmdRequest {
