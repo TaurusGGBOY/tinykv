@@ -343,7 +343,7 @@ func (p *peer) Term() uint64 {
 }
 
 func (p *peer) HeartbeatScheduler(ch chan<- worker.Task) {
-	log.Infof("ggb: %v %v heartbeat send region confver:%v", p.IsLeader(), p.PeerId(), p.Region().RegionEpoch.ConfVer)
+	//log.Infof("ggb: %v %v heartbeat send region confver:%v", p.IsLeader(), p.PeerId(), p.Region().RegionEpoch.ConfVer)
 	clonedRegion := new(metapb.Region)
 	err := util.CloneMsg(p.Region(), clonedRegion)
 	if err != nil {

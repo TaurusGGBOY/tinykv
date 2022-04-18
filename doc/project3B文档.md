@@ -46,6 +46,31 @@
 + 删除结点
   + 和insert反向操作就行
 
+## processSplit
+
+### 流程
+
++ `CheckRegionEpoch` `CheckKeyInRegion`
++ 创建peer，初始化region用
++ 读取region.peers
++ 创建新的region
++ 修改storemeta
++ 使用region，createPeer 
++ 注册peer
++ 发送MsgTypeStart
++ 回调返回
++ 发送心跳
+
+### 需要注意的点
+
++ SplitRequest NewPeerIds 是用来存新region里面的peers的 老region继承原peers
++ 拆分的两个region分别是 [startKey, splitKey), [splitKey, EndKey]
+  + 左闭右开
++ d.ctx.storeMeta.regionRanges作用是
+  + regionRanges：存的是region的endkey 然后可以通过这个查 到底一个key在哪个region中
++ d.ctx.storeMeta.regions作用是
+  + 通过regionid访问region
+
 ## 测试
 
 ### TestBasicConfChange3B
@@ -138,6 +163,11 @@ bug4:panic: [region 1] 2 meta corruption detected
 + 又给ctx加了lock 有点效果 但是总体很迷
 + TODO 很迷 最后还是没能完全解决 有概率会出现
 
+
+### TestSplitRecover3B
+
++ bug1:
+
 ## 可能用到和修改的地方
 
 ### pendingConfIndex
@@ -169,6 +199,11 @@ bug4:panic: [region 1] 2 meta corruption detected
   + 往kv batch里面写regionstate信息
   + removePeerCache
 
+## CheckKeyInRegion
+
++ 为什么会出现split的key不在region里面的情况？
+  + 如果split propose是split前发出 并且split完成后收到，并且这个key刚好split出去了，就会不在region里
+
 ## 问题
 
 + storeID是什么
@@ -179,8 +214,14 @@ bug4:panic: [region 1] 2 meta corruption detected
 + 如何添加peer的
   + leader在第一次给他发送消息的时候，会判断maybeCreatePeer
   + 这里面会调用newPeer newRawnode newRaft等
-+ 1主 2从 removeNode1会怎么样
++ 1是主 2是从 removeNode1会怎么样
   + 收到propose的时候先判断是否是这种情况，如果是，就丢掉这个propose
++ 一共有几个worker
+  + 看startWorkers代码，有四个worker，分别是
+    + 检查split
+    + region
+    + GC
+    + 调度
 
 ## TODO
 
