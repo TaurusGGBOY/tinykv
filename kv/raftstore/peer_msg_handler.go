@@ -697,13 +697,14 @@ func (d *peerMsgHandler) process(entry eraftpb.Entry) {
 		panic(err)
 	}
 
+	if msg.AdminRequest != nil {
+		d.processAdminRequest(entry, msg)
+	}
+
 	if len(msg.Requests) > 0 {
 		d.processRequest(entry, msg)
 	}
 
-	if msg.AdminRequest != nil {
-		d.processAdminRequest(entry, msg)
-	}
 }
 
 func (d *peerMsgHandler) processRequest(entry eraftpb.Entry, msg *raft_cmdpb.RaftCmdRequest) {

@@ -219,8 +219,8 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 					v := string(bytes.Join(values, []byte("")))
 					if v != last {
 						log.Fatalf("get wrong value, client %v\nwant:%v\ngot: %v\n", cli, last, v)
-					}else{
-						log.Infof("get right value, client %v\nwant:%v\ngot: %v\n", cli, last, v)
+					} else {
+						log.Infof("start key %v get right value, client %v\nwant:%v\ngot: %v\n", start, cli, last, v)
 					}
 				}
 			}
