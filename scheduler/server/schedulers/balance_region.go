@@ -14,10 +14,12 @@
 package schedulers
 
 import (
+	"fmt"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/core"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule/operator"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule/opt"
+	"sort"
 )
 
 func init() {
@@ -75,8 +77,96 @@ func (s *balanceRegionScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
 	return s.opController.OperatorCount(operator.OpRegion) < cluster.GetRegionScheduleLimit()
 }
 
+type storeInfo []*core.StoreInfo
+
+func (s storeInfo) Len() int { return len(s) }
+
+func (s storeInfo) Less(i, j int) bool { return s[i].GetRegionSize() < s[j].GetRegionSize() }
+func (s storeInfo) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+
 func (s *balanceRegionScheduler) Schedule(cluster opt.Cluster) *operator.Operator {
 	// Your Code Here (3C).
+	// 获取所有store 宕机时间不能太大
+	stores := make(storeInfo, 0)
+	for _, store := range cluster.GetStores() {
+		if store.IsUp() && store.DownTime() < cluster.GetMaxStoreDownTime() {
+			stores = append(stores, store)
+		}
+	}
 
-	return nil
+	// 如果只有自己一个 就不用平衡了
+	if stores.Len() < 2 {
+		return nil
+	}
+	// 按照 regionSize 排序
+	sort.Sort(stores)
+
+	// 寻找 store 来 move 减小负载 从大到小 随机选中一个幸运儿
+	var region *core.RegionInfo
+	i := stores.Len() - 1
+	for ; i > 0; i-- {
+		cluster.GetPendingRegionsWithLock(stores[i].GetID(), func(regions core.RegionsContainer) {
+			region = regions.RandomRegion(nil, nil)
+		})
+		if region != nil {
+			break
+		}
+		cluster.GetFollowersWithLock(stores[i].GetID(), func(regions core.RegionsContainer) {
+			region = regions.RandomRegion(nil, nil)
+		})
+		if region != nil {
+			break
+		}
+		cluster.GetLeadersWithLock(stores[i].GetID(), func(regions core.RegionsContainer) {
+			region = regions.RandomRegion(nil, nil)
+		})
+		if region != nil {
+			break
+		}
+	}
+	// 如果没有要搬运的（都是空的）
+	if region == nil {
+		return nil
+	}
+
+	// 要搬运的store
+	src := stores[i]
+	// 获取这个region占用的store的ID
+	ids := region.GetStoreIds()
+	// 如果小于就maxReplicas就不继续搬运了
+	if len(ids) < cluster.GetMaxReplicas() {
+		return nil
+	}
+	// 从小到大 找一个负载小的 并且没被启用的 放进去
+	var dst *core.StoreInfo
+	for j := 0; j < i; j++ {
+		if _, ok := ids[stores[j].GetID()]; !ok {
+			dst = stores[j]
+			break
+		}
+	}
+	if dst == nil {
+		return nil
+	}
+
+	// 防止搬运太频繁
+	if src.GetRegionSize()-dst.GetRegionSize() < 2*region.GetApproximateSize() {
+		return nil
+	}
+
+	// 分配peer
+	peer, err := cluster.AllocPeer(dst.GetID())
+	if err != nil {
+		return nil
+	}
+	descript := fmt.Sprintf("move from %d to %d", src.GetID(), dst.GetID())
+
+	// move
+	op, err := operator.CreateMovePeerOperator(descript, cluster, region, operator.OpBalance, src.GetID(), dst.GetID(), peer.GetId())
+	if err != nil {
+		return nil
+	}
+
+	return op
+
 }

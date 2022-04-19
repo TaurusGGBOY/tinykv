@@ -226,9 +226,14 @@ bug4:panic: [region 1] 2 meta corruption detected
 ## TODO
 
 + confChange没有debug出来
++ split还是有超时的问题
 
 ## 参考
 
 + http://blog.rinchannow.top/tinykv-notes/
 + https://www.inlighting.org/archives/talent-plan-tinykv-white-paper/
 + https://asktug.com/t/topic/274196
+
+## 结果
+
+![](https://raw.githubusercontent.com/TaurusGGBOY/photobed/master/20220419232144.png)
