@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="RemoteTargetsManager">
+    <targets>
+      <target name="ggb@192.168.254.132:22" type="ssh/sftp" uuid="a40d7727-a9ff-4b68-a622-b36662ba4278">
+        <config>
+          <option name="projectRootOnTarget" value="$USER_HOME$/tinykv" />
+          <option name="serverName" value="ggb@192.168.254.132:22 password" />
+          <option name="useRsync" value="true" />
+        </config>
+        <ContributedStateBase type="GoLanguageRuntime">
+          <config>
+            <option name="goPath" value="$USER_HOME$/go" />
+            <option name="goRoot" value="/usr/bin/go" />
+            <option name="goVersion" value="go1.13.8 linux/amd64" />
+          </config>
+        </ContributedStateBase>
+      </target>
+    </targets>
+  </component>
+</project>
